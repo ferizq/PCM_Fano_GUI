@@ -1,0 +1,11 @@
+{
+  "iC": { "value": 171400.0, "vary": false, "min": 171400.0, "max": 171400.0 },
+  "iD": { "value": 100000, "vary": false, "min": 10000.0, "max": 100000.0 },
+  "ib": { "value": 0.0, "vary": true, "min": -10.0, "max": 10.0 },
+  "ig0": { "value": 4.35487, "vary": true, "min": 1e-6, "max": 10.0 },
+  "iq": { "value": -100.0, "vary": false, "min": -1000.0, "max": 1000.0 },
+  "ia": { "value": 0.5431, "vary": false, "min": 0.1, "max": 0.6 },
+  "iL": { "value": 20, "vary": true, "min": 5.0, "max": 60.0 },
+  "N": { "value": 2.14661e-06, "vary": true, "min": 0.0, "max": 1e6 },
+  "y0": { "value": 559.138, "vary": true, "min": -1e6, "max": 1e6 }
+}

@@ -1,0 +1,6 @@
+numpy
+scipy
+plotly
+lmfit
+PySide6
+pyinstaller
