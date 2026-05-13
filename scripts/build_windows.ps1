@@ -71,7 +71,8 @@ $addData = "$cfg;configs"
 
 Write-Host "Running PyInstaller (this may take a minute)..."
 # build a windowed (no-console) executable so it can be double-clicked from Explorer
-& $venvPython -m PyInstaller --onefile --noconsole --name peakfit --add-data $addData --hidden-import lmfit --hidden-import plotly --hidden-import pkg_resources.py2_warn scripts\fit_peak.py
+# Use the GUI entrypoint `scripts\gui_app.py` and ensure common Qt/WebEngine modules
+& $venvPython -m PyInstaller --onefile --noconsole --name peakfit --add-data $addData --hidden-import lmfit --hidden-import plotly --hidden-import pkg_resources.py2_warn --hidden-import PySide6 --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui --hidden-import PySide6.QtCore --hidden-import PySide6.QtWebEngineWidgets --hidden-import PySide6.QtWebEngineCore scripts\gui_app.py
 
 Write-Host "Build finished. Executable: dist\\peakfit.exe"
 

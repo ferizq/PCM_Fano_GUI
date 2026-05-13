@@ -33,6 +33,21 @@ def load_data(path: str) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def load_param_config(path: str) -> Dict[str, Dict]:
-    with open(path, "r") as f:
+    with open(path, "r", encoding='utf-8') as f:
         cfg = json.load(f)
-    return cfg
+
+    # Canonicalize legacy parameter names that start with a leading 'i'.
+    # If the JSON contains both the legacy key (e.g. 'iC') and the canonical
+    # key (e.g. 'C'), prefer the canonical key and ignore the legacy one.
+    out = {}
+    keys = set(cfg.keys())
+    for k, v in cfg.items():
+        if isinstance(k, str) and k.startswith('i') and len(k) > 1:
+            nk = k[1:]
+            if nk in keys:
+                # canonical key present; skip legacy key
+                continue
+            out[nk] = v
+        else:
+            out[k] = v
+    return out

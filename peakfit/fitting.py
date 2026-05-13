@@ -70,10 +70,11 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
     # (e.g. 'autoscale') are not passed through causing unexpected-kwarg errors.
     integrator_kwargs = {
         'integrator': integrator_opts.get('integrator', 'grid'),
-        'grid_size': int(integrator_opts.get('grid_size', 400)),
+        'grid_size': int(integrator_opts.get('grid_size', 4000)),
         'ik_min': float(integrator_opts.get('ik_min', 0.0)),
         'ik_max': float(integrator_opts.get('ik_max', 1.0)),
-        'quad_opts': integrator_opts.get('quad_opts', None)
+        'quad_opts': integrator_opts.get('quad_opts', None),
+        'kernel': integrator_opts.get('kernel', 'PCM_Fano_Bessel')
     }
 
     free_names, p0, bounds = _build_free_params(param_config)
@@ -122,8 +123,8 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                 # force zero baseline for amplitude estimate
                 tmp_params['y0'] = 0.0
                 # use a smaller grid for speed
-                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 400) // 4))))
-                amp_model = np.max(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size)) - np.min(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size))
+                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 4000) // 4))))
+                amp_model = np.max(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))) - np.min(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel')))
                 if amp_model > 0 and np.isfinite(amp_model):
                     N0 = float(y_range / (amp_model + 1e-24))
                     lo = lower_bounds[idx_N]
@@ -222,10 +223,11 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
     # (e.g. 'autoscale') are not passed through causing unexpected-kwarg errors.
     integrator_kwargs = {
         'integrator': integrator_opts.get('integrator', 'grid'),
-        'grid_size': int(integrator_opts.get('grid_size', 400)),
+        'grid_size': int(integrator_opts.get('grid_size', 4000)),
         'ik_min': float(integrator_opts.get('ik_min', 0.0)),
         'ik_max': float(integrator_opts.get('ik_max', 1.0)),
-        'quad_opts': integrator_opts.get('quad_opts', None)
+        'quad_opts': integrator_opts.get('quad_opts', None),
+        'kernel': integrator_opts.get('kernel', 'PCM_Fano_Bessel')
     }
 
     params = lmfit.Parameters()
@@ -255,7 +257,7 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                 tmp_p[idx_N] = 1.0
                 tmp_params = _params_from_vector(free_names, tmp_p, param_config)
                 tmp_params['y0'] = 0.0
-                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 400) // 4))))
+                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 4000) // 4))))
                 amp_model = np.max(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size)) - np.min(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size))
                 if amp_model > 0 and np.isfinite(amp_model):
                     N0 = float(y_range / (amp_model + 1e-24))
@@ -380,7 +382,7 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                     eps = 1e-6
                     # choose a smaller grid size for FD if available
                     try:
-                        fd_grid = int(min(200, int(integrator_kwargs.get('grid_size', 400))))
+                        fd_grid = int(min(200, int(integrator_kwargs.get('grid_size', 4000))))
                     except Exception:
                         fd_grid = 100
                     for j in range(nfree):
@@ -396,8 +398,8 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                         params_minus = _params_from_vector(free_names, p_minus, param_config)
                         # Prefer a fast grid evaluation for FD
                         try:
-                            y_plus = model_func(iw, params_plus, integrator='grid', grid_size=fd_grid)
-                            y_minus = model_func(iw, params_minus, integrator='grid', grid_size=fd_grid)
+                            y_plus = model_func(iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))
+                            y_minus = model_func(iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))
                         except Exception:
                             y_plus = model_func(iw, params_plus, **integrator_kwargs)
                             y_minus = model_func(iw, params_minus, **integrator_kwargs)

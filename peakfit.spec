@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['scripts\\fit_peak.py'],
+    ['scripts\\gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('E:\\VS_CODE\\PCM_Fano\\configs\\\\default_params.json', 'configs')],
-    hiddenimports=['lmfit', 'plotly', 'pkg_resources.py2_warn'],
+    datas=[('E:\\VS_CODE\\PCM_Fano_GUI\\configs\\\\default_params.json', 'configs')],
+    hiddenimports=['lmfit', 'plotly', 'pkg_resources.py2_warn', 'PySide6', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

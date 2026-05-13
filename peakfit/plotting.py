@@ -56,10 +56,17 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     fig_resid.add_trace(go.Scatter(x=iw, y=residuals, mode='markers', name='residuals', marker=dict(size=4)))
     fig_resid.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240)
 
-    # Convert figures to HTML fragments. We will include plotly.js via the page header
-    # so set include_plotlyjs=False for both fragments.
-    main_div = fig_main.to_html(full_html=False, include_plotlyjs=False)
-    resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
+    # Convert figures to HTML fragments. If local assets are available we will
+    # reference them; otherwise embed Plotly into the main fragment so the
+    # exported HTML is self-contained and shows plots offline.
+    use_local_plotly = assets_dir is not None and os.path.isdir(assets_dir) and os.path.isfile(os.path.join(assets_dir, 'plotly.min.js'))
+    if use_local_plotly:
+      main_div = fig_main.to_html(full_html=False, include_plotlyjs=False)
+      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
+    else:
+      # embed plotly JS into the main fragment to avoid external CDN dependency
+      main_div = fig_main.to_html(full_html=False, include_plotlyjs=True)
+      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
 
     # Build HTML parameter table (regular HTML so markup like <sup> works and text is selectable)
     table_html_lines = [
@@ -105,17 +112,17 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     katex_js = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js'
     katex_autorender = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js'
     # Only use local assets when the expected JS file exists in the assets dir.
-    if assets_dir is not None and os.path.isdir(assets_dir) and os.path.isfile(os.path.join(assets_dir, 'plotly.min.js')):
-      out_dir = os.path.abspath(os.path.dirname(output_html) or '.')
-      try:
-        rel = os.path.relpath(os.path.abspath(assets_dir), out_dir)
-      except Exception:
-        rel = os.path.abspath(assets_dir)
-      rel = rel.replace('\\', '/')
-      plotly_src = f"{rel}/plotly.min.js"
-      katex_css = f"{rel}/katex.min.css"
-      katex_js = f"{rel}/katex.min.js"
-      katex_autorender = f"{rel}/auto-render.min.js"
+    if use_local_plotly:
+        out_dir = os.path.abspath(os.path.dirname(output_html) or '.')
+        try:
+            rel = os.path.relpath(os.path.abspath(assets_dir), out_dir)
+        except Exception:
+            rel = os.path.abspath(assets_dir)
+        rel = rel.replace('\\', '/')
+        plotly_src = f"{rel}/plotly.min.js"
+        katex_css = f"{rel}/katex.min.css"
+        katex_js = f"{rel}/katex.min.js"
+        katex_autorender = f"{rel}/auto-render.min.js"
 
     # Compose final HTML using a CSS grid (2 rows x 3 columns) with fixed plot sizes
     html_template = """<!doctype html>
@@ -124,7 +131,7 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     <meta charset="utf-8">
     <title>Peak fit</title>
     <link rel="stylesheet" href="%%KATEX_CSS%%">
-    <script src="%%PLOTLY_SRC%%"></script>
+    %%PLOTLY_HEAD%%
     <script defer src="%%KATEX_JS%%"></script>
     <script defer src="%%KATEX_AUTORENDER%%"></script>
     <style>
@@ -164,16 +171,25 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
   </body>
 </html>"""
 
+    # Decide what to place in the header for Plotly (either a script tag
+    # referencing a local file / CDN, or empty when Plotly is already
+    # embedded into `main_div`).
+    if use_local_plotly:
+      plotly_head = f"<script src=\"{plotly_src}\"></script>"
+    else:
+      # main_div already embeds Plotly when local assets are not available
+      plotly_head = ''
+
     html = (html_template
-            .replace('%%MAIN_DIV%%', main_div)
-            .replace('%%RESID_DIV%%', resid_div)
-            .replace('%%TABLE_HTML%%', table_html)
-            .replace('%%MATH_BLOCK%%', math_block)
-            .replace('%%STATUS_HTML%%', status_html)
-            .replace('%%PLOTLY_SRC%%', plotly_src)
-            .replace('%%KATEX_CSS%%', katex_css)
-            .replace('%%KATEX_JS%%', katex_js)
-            .replace('%%KATEX_AUTORENDER%%', katex_autorender))
+        .replace('%%MAIN_DIV%%', main_div)
+        .replace('%%RESID_DIV%%', resid_div)
+        .replace('%%TABLE_HTML%%', table_html)
+        .replace('%%MATH_BLOCK%%', math_block)
+        .replace('%%STATUS_HTML%%', status_html)
+        .replace('%%PLOTLY_HEAD%%', plotly_head)
+        .replace('%%KATEX_CSS%%', katex_css)
+        .replace('%%KATEX_JS%%', katex_js)
+        .replace('%%KATEX_AUTORENDER%%', katex_autorender))
 
     with open(output_html, 'w', encoding='utf-8') as f:
         f.write(html)

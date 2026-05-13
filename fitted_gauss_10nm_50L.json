@@ -1,0 +1,62 @@
+{
+  "alpha": {
+    "value": 78.9568,
+    "vary": false,
+    "min": 1.0,
+    "max": 100.0
+  },
+  "C": {
+    "value": 171400.0,
+    "vary": false,
+    "min": 171400.0,
+    "max": 171410.0
+  },
+  "D": {
+    "value": 100000.0,
+    "vary": false,
+    "min": 100000.0,
+    "max": 100010.0
+  },
+  "b": {
+    "value": 5.7521,
+    "vary": true,
+    "min": -10.0,
+    "max": 10.0
+  },
+  "g0": {
+    "value": 9.1952,
+    "vary": true,
+    "min": 1.0,
+    "max": 10.0
+  },
+  "q": {
+    "value": -14.1832,
+    "vary": true,
+    "min": -1000000000000.0,
+    "max": 1000000000000.0
+  },
+  "a": {
+    "value": 0.5431,
+    "vary": false,
+    "min": 0.54,
+    "max": 0.55
+  },
+  "L": {
+    "value": 11.3988,
+    "vary": true,
+    "min": 5.0,
+    "max": 50.0
+  },
+  "N": {
+    "value": 639.03,
+    "vary": true,
+    "min": 1e-20,
+    "max": 1e+20
+  },
+  "y0": {
+    "value": 0.0189,
+    "vary": true,
+    "min": -10000.0,
+    "max": 10000.0
+  }
+}

@@ -16,6 +16,7 @@ from typing import Dict, Any
 
 import numpy as np
 import plotly.graph_objects as go
+import copy
 
 try:
     from PySide6 import QtCore, QtWidgets
@@ -34,6 +35,34 @@ except Exception as e:
 from .io import load_data, load_param_config
 from .fitting import fit_with_lmfit, fit_with_scipy, _build_free_params, _params_from_vector
 from .model import model as compute_model
+
+# Built-in default parameter sets used to initialize the GUI when the user
+# selects a kernel. These mirror the values used in the test fixtures /
+# `params_gauss.json` (embedded here so the GUI can self-initialize).
+GAUSS_DEFAULT_PARAMS = {
+    'C':   {'value': 171400.0, 'vary': False, 'min': None, 'max': None},
+    'D':   {'value': 100000.0, 'vary': False, 'min': None, 'max': None},
+    'b':   {'value': 0.0, 'vary': True, 'min': None, 'max': None},
+    'g0':  {'value': 4.5, 'vary': True, 'min': 1e-6, 'max': 10.0},
+    'q':   {'value': 2.0, 'vary': True, 'min': -1000.0, 'max': 1000.0},
+    'a':   {'value': 0.5431, 'vary': False, 'min': 0.1, 'max': 0.6},
+    'L':   {'value': 10.0, 'vary': True, 'min': 1.0, 'max': 100.0},
+    'alpha': {'value': 1.0, 'vary': False, 'min': 0.0, 'max': None},
+    'N':   {'value': 1.0, 'vary': True, 'min': 0.0, 'max': 1e9},
+    'y0':  {'value': 0.0, 'vary': True, 'min': -1e9, 'max': 1e9},
+}
+
+BESSEL_DEFAULT_PARAMS = {
+    'C':   {'value': 171400.0, 'vary': False, 'min': None, 'max': None},
+    'D':   {'value': 100000.0, 'vary': False, 'min': None, 'max': None},
+    'b':   {'value': 0.0, 'vary': True, 'min': None, 'max': None},
+    'g0':  {'value': 4.5, 'vary': True, 'min': 1e-6, 'max': 10.0},
+    'q':   {'value': 2.0, 'vary': True, 'min': -1000.0, 'max': 1000.0},
+    'a':   {'value': 0.5431, 'vary': False, 'min': 0.1, 'max': 0.6},
+    'L':   {'value': 10.0, 'vary': True, 'min': 1.0, 'max': 100.0},
+    'N':   {'value': 1.0, 'vary': True, 'min': 0.0, 'max': 1e9},
+    'y0':  {'value': 0.0, 'vary': True, 'min': -1e9, 'max': 1e9},
+}
 
 
 def sci_format(x, decimals: int = 4):
@@ -156,12 +185,24 @@ class MainWindow(QMainWindow):
         brl.addWidget(self.btn_export_html)
         left_l.addWidget(btn_row)
 
+        # show currently loaded data file
+        self.loaded_file_label = QLabel('No file loaded')
+        try:
+            self.loaded_file_label.setToolTip('Currently loaded TXT data file')
+        except Exception:
+            pass
+        left_l.addWidget(self.loaded_file_label)
+
+        btn_fit_row = QWidget()
+        bfr = QHBoxLayout(btn_fit_row)
+        bfr.setContentsMargins(0, 0, 0, 0)
         self.btn_step = QPushButton('Step Fit')
         self.btn_fit = QPushButton('Fit (full)')
         self.btn_cancel = QPushButton('Cancel')
-        left_l.addWidget(self.btn_step)
-        left_l.addWidget(self.btn_fit)
-        left_l.addWidget(self.btn_cancel)
+        bfr.addWidget(self.btn_step)
+        bfr.addWidget(self.btn_fit)
+        bfr.addWidget(self.btn_cancel)
+        left_l.addWidget(btn_fit_row)
 
         # Integrator & backend controls
         # Controls arranged in two rows so the left pane can be narrowed
@@ -169,6 +210,7 @@ class MainWindow(QMainWindow):
         ctrl_v = QVBoxLayout(ctrl_container)
         ctrl_v.setContentsMargins(0, 0, 0, 0)
 
+        # Row 1: backend + integrator
         ctrl_row1 = QWidget()
         ctrl1 = QHBoxLayout(ctrl_row1)
         ctrl1.setContentsMargins(0, 0, 0, 0)
@@ -180,51 +222,91 @@ class MainWindow(QMainWindow):
         self.integrator_combo = QComboBox()
         self.integrator_combo.addItems(['grid', 'quad'])
         ctrl1.addWidget(self.integrator_combo)
-        ctrl1.addWidget(QLabel('LM method:'))
-        self.lm_method_combo = QComboBox()
-        self.lm_method_combo.addItems(['least_squares', 'leastsq', 'nelder', 'powell', 'lbfgsb'])
-        ctrl1.addWidget(self.lm_method_combo)
-        ctrl1.addWidget(QLabel('Max evals:'))
-        self.maxeval_spin = QSpinBox()
-        self.maxeval_spin.setRange(1, 20000000)
-        self.maxeval_spin.setSingleStep(100)
-        self.maxeval_spin.setValue(2000)
-        ctrl1.addWidget(self.maxeval_spin)
-        ctrl1.addWidget(QLabel('Autoscale'))
-        self.autoscale_cb = QCheckBox()
-        self.autoscale_cb.setChecked(True)
-        ctrl1.addWidget(self.autoscale_cb)
         ctrl_v.addWidget(ctrl_row1)
 
+        # Row 2: kernel + fit range controls
+        ctrl_row1b = QWidget()
+        ctrl1b = QHBoxLayout(ctrl_row1b)
+        ctrl1b.setContentsMargins(0, 0, 0, 0)
+        ctrl1b.addWidget(QLabel('Kernel:'))
+        self.kernel_combo = QComboBox()
+        self.kernel_combo.addItems(['PCM_Fano_Bessel', 'PCM_Fano_Gauss'])
+        ctrl1b.addWidget(self.kernel_combo)
+        self.btn_kernel_info = QPushButton('Info')
+        ctrl1b.addWidget(self.btn_kernel_info)
+        ctrl1b.addWidget(QLabel('Fit x start:'))
+        self.fit_xmin_spin = QSpinBox()
+        self.fit_xmin_spin.setRange(-999999999, 999999999)
+        self.fit_xmin_spin.setSingleStep(1)
+        self.fit_xmin_spin.setValue(0)
+        ctrl1b.addWidget(self.fit_xmin_spin)
+        ctrl1b.addWidget(QLabel('Fit x end:'))
+        self.fit_xmax_spin = QSpinBox()
+        self.fit_xmax_spin.setRange(-999999999, 999999999)
+        self.fit_xmax_spin.setSingleStep(1)
+        self.fit_xmax_spin.setValue(0)
+        ctrl1b.addWidget(self.fit_xmax_spin)
+        self.btn_apply_range = QPushButton('Apply Range')
+        ctrl1b.addWidget(self.btn_apply_range)
+        # Option to rescale main plot to the selected fit range
+        self.rescale_cb = QCheckBox('Rescale plot to range')
+        self.rescale_cb.setChecked(False)
+        self.rescale_cb.setToolTip('When checked, zoom the main plot to the selected fit x-range')
+        ctrl1b.addWidget(self.rescale_cb)
+        ctrl_v.addWidget(ctrl_row1b)
+
+        # Row 3: LM method, max evals, autoscale
         ctrl_row2 = QWidget()
         ctrl2 = QHBoxLayout(ctrl_row2)
         ctrl2.setContentsMargins(0, 0, 0, 0)
-        ctrl2.addWidget(QLabel('Grid size:'))
+        ctrl2.addWidget(QLabel('LM method:'))
+        self.lm_method_combo = QComboBox()
+        self.lm_method_combo.addItems(['least_squares', 'leastsq', 'nelder', 'powell', 'lbfgsb'])
+        ctrl2.addWidget(self.lm_method_combo)
+        ctrl2.addWidget(QLabel('Max evals:'))
+        self.maxeval_spin = QSpinBox()
+        self.maxeval_spin.setRange(1, 20000000)
+        self.maxeval_spin.setSingleStep(100)
+        self.maxeval_spin.setValue(10000)
+        ctrl2.addWidget(self.maxeval_spin)
+        ctrl2.addWidget(QLabel('Autoscale'))
+        self.autoscale_cb = QCheckBox()
+        self.autoscale_cb.setChecked(True)
+        ctrl2.addWidget(self.autoscale_cb)
+        ctrl_v.addWidget(ctrl_row2)
+
+        # Row 4: grid and preview options
+        ctrl_row3 = QWidget()
+        ctrl3 = QHBoxLayout(ctrl_row3)
+        ctrl3.setContentsMargins(0, 0, 0, 0)
+        ctrl3.addWidget(QLabel('Grid size:'))
         self.grid_spin = QSpinBox()
-        self.grid_spin.setRange(10, 5000)
+        self.grid_spin.setRange(10, 10000)
         self.grid_spin.setSingleStep(10)
-        self.grid_spin.setValue(400)
-        ctrl2.addWidget(self.grid_spin)
-        ctrl2.addWidget(QLabel('ik_min:'))
+        self.grid_spin.setValue(4000)
+        ctrl3.addWidget(self.grid_spin)
+        ctrl3.addWidget(QLabel('ik_min:'))
         self.ik_min_spin = QDoubleSpinBox()
         self.ik_min_spin.setRange(-10.0, 10.0)
         self.ik_min_spin.setSingleStep(0.01)
         self.ik_min_spin.setValue(0.0)
-        ctrl2.addWidget(self.ik_min_spin)
-        ctrl2.addWidget(QLabel('ik_max:'))
+        ctrl3.addWidget(self.ik_min_spin)
+        ctrl3.addWidget(QLabel('ik_max:'))
         self.ik_max_spin = QDoubleSpinBox()
         self.ik_max_spin.setRange(-10.0, 10.0)
         self.ik_max_spin.setSingleStep(0.01)
         self.ik_max_spin.setValue(1.0)
-        ctrl2.addWidget(self.ik_max_spin)
-        ctrl2.addWidget(QLabel('Preview grid:'))
+        ctrl3.addWidget(self.ik_max_spin)
+        ctrl3.addWidget(QLabel('Preview grid:'))
         self.preview_spin = QSpinBox()
         self.preview_spin.setRange(10, 2000)
         self.preview_spin.setValue(100)
-        ctrl2.addWidget(self.preview_spin)
+        ctrl3.addWidget(self.preview_spin)
         self.btn_preview = QPushButton('Preview')
-        ctrl2.addWidget(self.btn_preview)
-        ctrl_v.addWidget(ctrl_row2)
+        ctrl3.addWidget(self.btn_preview)
+        self.btn_normalize = QPushButton('Normalize')
+        ctrl3.addWidget(self.btn_normalize)
+        ctrl_v.addWidget(ctrl_row3)
 
         left_l.addWidget(ctrl_container)
         # Tooltips for quick help
@@ -238,6 +320,9 @@ class MainWindow(QMainWindow):
             self.ik_min_spin.setToolTip('Lower integration limit (ik)')
             self.ik_max_spin.setToolTip('Upper integration limit (ik)')
             self.preview_spin.setToolTip('Grid size used for preview plots')
+            self.btn_normalize.setToolTip('Normalize y to [0,1] using (y-min)/(max-min)')
+            self.kernel_combo.setToolTip('Choose kernel/integrand shape used in the model')
+            self.btn_kernel_info.setToolTip('Show formula and parameter names for the selected kernel')
             self.btn_preview.setToolTip('Render a preview of the model with the current parameter values')
             self.btn_step.setToolTip('Run a short fit step (5 function evaluations)')
             self.btn_fit.setToolTip('Run the full fit until convergence or max evals')
@@ -328,6 +413,26 @@ class MainWindow(QMainWindow):
         self.btn_fit.clicked.connect(lambda: self.start_fit(mode='full'))
         self.btn_cancel.clicked.connect(self.cancel_fit)
         self.btn_preview.clicked.connect(self.preview_model)
+        try:
+            self.btn_apply_range.clicked.connect(lambda: self._apply_fit_range())
+        except Exception:
+            pass
+        try:
+            self.rescale_cb.stateChanged.connect(lambda *_: self._render_preview(y_model=getattr(self, 'last_y_model', None)))
+        except Exception:
+            pass
+        try:
+            self.btn_normalize.clicked.connect(self.normalize_data)
+        except Exception:
+            pass
+        try:
+            self.kernel_combo.currentTextChanged.connect(self._on_kernel_changed)
+        except Exception:
+            pass
+        try:
+            self.btn_kernel_info.clicked.connect(self._show_kernel_info)
+        except Exception:
+            pass
 
     def load_data(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Open data file', '.', 'Text Files (*.txt);;All Files (*)')
@@ -340,6 +445,34 @@ class MainWindow(QMainWindow):
             return
         self.iw = iw
         self.y = y
+        # if fit-range controls exist, set their sensible ranges to the data
+        try:
+            xv = np.asarray(self.iw, dtype=float)
+            xmin = float(np.min(xv))
+            xmax = float(np.max(xv))
+            if hasattr(self, 'fit_xmin_spin'):
+                imin = int(np.floor(xmin))
+                imax = int(np.ceil(xmax))
+                # clamp to spinbox allowable range
+                imin = max(-999999999, imin)
+                imax = min(999999999, imax)
+                self.fit_xmin_spin.setRange(imin, imax)
+                self.fit_xmin_spin.setValue(imin)
+            if hasattr(self, 'fit_xmax_spin'):
+                imin = int(np.floor(xmin))
+                imax = int(np.ceil(xmax))
+                imin = max(-999999999, imin)
+                imax = min(999999999, imax)
+                self.fit_xmax_spin.setRange(imin, imax)
+                self.fit_xmax_spin.setValue(imax)
+        except Exception:
+            pass
+        # remember and display the loaded file path (basename)
+        try:
+            self.current_data_path = path
+            self.loaded_file_label.setText(os.path.basename(path) if path is not None else '')
+        except Exception:
+            pass
         self._render_preview()
 
     def load_params(self):
@@ -358,9 +491,17 @@ class MainWindow(QMainWindow):
         if self.iw is None or self.y is None:
             QtWidgets.QMessageBox.warning(self, 'Warning', 'Load data first')
             return
+        # If no parameter configuration is loaded, attempt to auto-initialize
+        # parameters from the project's configs (prefer `params_gauss.json`
+        # or `params_bessel.json`) or fall back to embedded defaults.
         if not self.param_config:
-            QtWidgets.QMessageBox.warning(self, 'Warning', 'Load parameter JSON first')
-            return
+            try:
+                self._ensure_param_config_initialized()
+            except Exception:
+                pass
+            if not self.param_config:
+                QtWidgets.QMessageBox.warning(self, 'Warning', 'Load parameter JSON first')
+                return
         # read current table values into param_config
         self._read_table_into_config()
 
@@ -371,8 +512,9 @@ class MainWindow(QMainWindow):
         ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
         ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
 
+        kernel = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
         try:
-            y_model = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max)
+            y_model = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', f'Preview generation failed: {e}')
             return
@@ -510,10 +652,13 @@ class MainWindow(QMainWindow):
         backend = self.backend_combo.currentText() if hasattr(self, 'backend_combo') else 'lmfit'
         integrator_opts = {
             'integrator': self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid',
-            'grid_size': int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 400,
+            'grid_size': int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000,
             'ik_min': float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0,
             'ik_max': float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0,
-            'autoscale': bool(self.autoscale_cb.isChecked()) if hasattr(self, 'autoscale_cb') else True,
+            # Always use the parameters shown in the table as the starting
+            # guess for both step and full fits (do not autoscale p0 here).
+            'autoscale': False,
+            'kernel': self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel',
         }
 
         # For step-mode fits, disable autoscaling so successive short fits
@@ -553,7 +698,27 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.fit_worker = FitWorker(self.iw, self.y, self.param_config, backend=backend, integrator_opts=integrator_opts, minimizer_opts=minimizer_opts)
+        # Respect the user-selected fit x-range (if any) and pass the sliced
+        # data to the fitter so the backend only sees the requested points.
+        try:
+            iw_use = np.asarray(self.iw)
+            y_use = np.asarray(self.y)
+            if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                x0 = float(self.fit_xmin_spin.value())
+                x1 = float(self.fit_xmax_spin.value())
+                if x0 > x1:
+                    x0, x1 = x1, x0
+                mask = (iw_use >= x0) & (iw_use <= x1)
+                if np.count_nonzero(mask) == 0:
+                    QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected fit range contains no data points; aborting fit')
+                    return
+                iw_use = iw_use[mask]
+                y_use = y_use[mask]
+        except Exception:
+            iw_use = np.asarray(self.iw)
+            y_use = np.asarray(self.y)
+
+        self.fit_worker = FitWorker(iw_use, y_use, self.param_config, backend=backend, integrator_opts=integrator_opts, minimizer_opts=minimizer_opts)
         self.fit_thread = QtCore.QThread()
         self.fit_worker.moveToThread(self.fit_thread)
         self.fit_thread.started.connect(self.fit_worker.run)
@@ -648,6 +813,7 @@ class MainWindow(QMainWindow):
             y_range = float(np.max(y_arr) - np.min(y_arr)) if y_arr.size else 0.0
             sens_threshold = max(1e-8, 1e-6 * (y_range if y_range > 0 else float(np.std(y_arr))))
             test_grid = min(200, int(self.preview_spin.value())) if hasattr(self, 'preview_spin') else 100
+            kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
             for name in free_names:
                 pval = float(current_params.get(name, 0.0))
                 dp = abs(pval * 0.01) if abs(pval) > 0 else 1e-6
@@ -655,8 +821,12 @@ class MainWindow(QMainWindow):
                 p_minus = dict(current_params)
                 p_plus[name] = pval + dp
                 p_minus[name] = pval - dp
-                y_plus = compute_model(self.iw, p_plus, integrator='grid', grid_size=test_grid)
-                y_minus = compute_model(self.iw, p_minus, integrator='grid', grid_size=test_grid)
+                try:
+                    y_plus = compute_model(self.iw, p_plus, integrator='grid', grid_size=test_grid, kernel=kern)
+                    y_minus = compute_model(self.iw, p_minus, integrator='grid', grid_size=test_grid, kernel=kern)
+                except Exception:
+                    y_plus = compute_model(self.iw, p_plus, kernel=kern)
+                    y_minus = compute_model(self.iw, p_minus, kernel=kern)
                 rms_change = float(np.sqrt(np.mean((np.asarray(y_plus) - np.asarray(y_minus)) ** 2)))
                 if rms_change < sens_threshold:
                     insensitive.append(name)
@@ -702,6 +872,7 @@ class MainWindow(QMainWindow):
                     Jfd = np.zeros((ndata, nfree), dtype=float)
                     eps = 1e-6
                     fd_grid = int(min(200, int(self.preview_spin.value()))) if hasattr(self, 'preview_spin') else 100
+                    kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
                     for j in range(nfree):
                         pj = pvec[j]
                         dp = eps * max(1.0, abs(pj))
@@ -713,19 +884,19 @@ class MainWindow(QMainWindow):
                         params_plus = _params_from_vector(fnames, p_plus, self.param_config)
                         params_minus = _params_from_vector(fnames, p_minus, self.param_config)
                         try:
-                            y_plus = compute_model(self.iw, params_plus, integrator='grid', grid_size=fd_grid)
-                            y_minus = compute_model(self.iw, params_minus, integrator='grid', grid_size=fd_grid)
+                            y_plus = compute_model(self.iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=kern)
+                            y_minus = compute_model(self.iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=kern)
                         except Exception:
-                            y_plus = compute_model(self.iw, params_plus)
-                            y_minus = compute_model(self.iw, params_minus)
+                            y_plus = compute_model(self.iw, params_plus, kernel=kern)
+                            y_minus = compute_model(self.iw, params_minus, kernel=kern)
                         deriv = (np.asarray(y_plus) - np.asarray(y_minus)) / (2.0 * dp)
                         Jfd[:, j] = deriv
                     JTJ = Jfd.T.dot(Jfd)
                     params_base = _params_from_vector(fnames, pvec, self.param_config)
                     try:
-                        y_base = compute_model(self.iw, params_base, integrator='grid', grid_size=fd_grid)
+                        y_base = compute_model(self.iw, params_base, integrator='grid', grid_size=fd_grid, kernel=kern)
                     except Exception:
-                        y_base = compute_model(self.iw, params_base)
+                        y_base = compute_model(self.iw, params_base, kernel=kern)
                     resid_vec = np.asarray(self.y) - np.asarray(y_base)
                     dof = max(1, ndata - nfree)
                     s2 = float(np.sum(resid_vec ** 2) / dof) if dof > 0 else float(np.sum(resid_vec ** 2))
@@ -820,10 +991,33 @@ class MainWindow(QMainWindow):
                 except Exception:
                     self.table.item(r, 2).setText(str(errs[name]))
 
-        # Update plots
-        y_model = out.get('y_model')
-        if y_model is not None:
-            self.last_y_model = np.asarray(y_model)
+        # Update plots: compute the model on the full x-grid so the overlay
+        # shows the fitted function across all loaded data, even if the
+        # backend was only given a sliced subset.
+        try:
+            fitted_for_plot = {}
+            if isinstance(fitted, dict) and fitted:
+                fitted_for_plot = {n: float(v) for n, v in fitted.items()}
+            else:
+                # fall back to current param_config values
+                fitted_for_plot = {n: float(self.param_config[n].get('value', 0.0)) for n in self.param_config}
+            kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+            grid_sz = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+            integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+            try:
+                y_model_full = compute_model(self.iw, fitted_for_plot, integrator=integrator, grid_size=grid_sz, ik_min=float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0, ik_max=float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0, kernel=kern)
+                self.last_y_model = np.asarray(y_model_full)
+            except Exception:
+                # fallback to backend-provided y_model if full recompute fails
+                y_model = out.get('y_model')
+                self.last_y_model = np.asarray(y_model) if y_model is not None else None
+        except Exception:
+            try:
+                y_model = out.get('y_model')
+                self.last_y_model = np.asarray(y_model) if y_model is not None else None
+            except Exception:
+                self.last_y_model = None
+        if self.last_y_model is not None:
             self._render_preview(y_model=self.last_y_model)
 
     def _on_fit_error(self, msg: str):
@@ -872,13 +1066,99 @@ class MainWindow(QMainWindow):
         if y_model is not None:
             y_model_list = list(map(float, np.asarray(y_model)))
             main_fig.add_trace(go.Scatter(x=x_data, y=y_model_list, mode='lines', name='fit', line=dict(width=2)))
+        # If a fit-range is specified, highlight it on the main plot
+        try:
+            if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                x0 = float(self.fit_xmin_spin.value())
+                x1 = float(self.fit_xmax_spin.value())
+                if x0 < x1:
+                    main_fig.add_vrect(x0=x0, x1=x1, fillcolor='LightSalmon', opacity=0.2, layer='below', line_width=0)
+        except Exception:
+            pass
         main_fig.update_layout(title='Data and Fit', margin=dict(l=40, r=10, t=40, b=40), height=520, showlegend=False)
 
-        resid_arr = np.asarray(self.y) - (np.asarray(y_model) if y_model is not None else np.zeros_like(np.asarray(self.y)))
-        resid = list(map(float, resid_arr))
+        # Determine selected fit-range mask (if any) and whether to rescale
+        try:
+            x_arr = np.asarray(self.iw, dtype=float)
+            y_arr = np.asarray(self.y, dtype=float)
+        except Exception:
+            x_arr = np.asarray(self.iw)
+            y_arr = np.asarray(self.y)
+
+        mask = None
+        try:
+            if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                x0 = float(self.fit_xmin_spin.value())
+                x1 = float(self.fit_xmax_spin.value())
+                if x0 > x1:
+                    x0, x1 = x1, x0
+                mask = (x_arr >= x0) & (x_arr <= x1)
+        except Exception:
+            mask = None
+
+        # Residuals: restrict to selected mask if present
         res_fig = go.Figure()
-        res_fig.add_trace(go.Scatter(x=x_data, y=resid, mode='markers', name='residuals', marker=dict(size=4)))
+        try:
+            if y_model is not None:
+                y_model_arr = np.asarray(y_model)
+                resid_arr = y_arr - y_model_arr
+                if mask is not None:
+                    res_x = list(map(float, x_arr[mask]))
+                    res_y = list(map(float, resid_arr[mask]))
+                else:
+                    res_x = list(map(float, x_arr))
+                    res_y = list(map(float, resid_arr))
+                if len(res_x) > 0:
+                    res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
+            else:
+                # no model: plot nothing or empty residuals within mask
+                if mask is not None:
+                    res_x = list(map(float, x_arr[mask]))
+                    res_y = [0.0] * len(res_x)
+                    if len(res_x) > 0:
+                        res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
+        except Exception:
+            try:
+                # fallback: plot full-range zero residuals
+                res_fig.add_trace(go.Scatter(x=x_data, y=[0.0] * len(x_data), mode='markers', name='residuals', marker=dict(size=4)))
+            except Exception:
+                pass
+
+        # If requested, rescale main plot to selected x-range and y-limits of masked data/model
+        try:
+            if hasattr(self, 'rescale_cb') and self.rescale_cb.isChecked() and mask is not None and np.any(mask):
+                # x-limits
+                main_fig.update_xaxes(range=[float(x0), float(x1)])
+                # y-limits based on data/model inside mask
+                yvals = []
+                try:
+                    yvals.extend(list(y_arr[mask]))
+                except Exception:
+                    pass
+                try:
+                    if y_model is not None:
+                        yvals.extend(list(y_model_arr[mask]))
+                except Exception:
+                    pass
+                if len(yvals) > 0:
+                    ymin = float(np.min(yvals))
+                    ymax = float(np.max(yvals))
+                    if ymin == ymax:
+                        # small padding when flat
+                        ymin -= 1e-6
+                        ymax += 1e-6
+                    pad = max(1e-6, 0.05 * (ymax - ymin))
+                    main_fig.update_yaxes(range=[ymin - pad, ymax + pad])
+        except Exception:
+            pass
+
         res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
+        # Force residual x-axis to the selected range when mask present
+        try:
+            if mask is not None and np.any(mask):
+                res_fig.update_xaxes(range=[float(x0), float(x1)])
+        except Exception:
+            pass
 
         main_div = main_fig.to_html(full_html=False, include_plotlyjs=False)
         resid_div = res_fig.to_html(full_html=False, include_plotlyjs=False)
@@ -957,13 +1237,102 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                if getattr(self, 'last_y_model', None) is not None:
-                    for x, ym in zip(self.iw, self.last_y_model):
-                        f.write(f"{x}\t{ym}\n")
+            # determine selected range mask (only export points inside selected fit range)
+            try:
+                x_arr = np.asarray(self.iw, dtype=float)
+                if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                    x0 = float(self.fit_xmin_spin.value())
+                    x1 = float(self.fit_xmax_spin.value())
+                    if x0 > x1:
+                        x0, x1 = x1, x0
+                    mask = (x_arr >= x0) & (x_arr <= x1)
+                    if not np.any(mask):
+                        QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to save')
+                        return
                 else:
-                    for x, y in zip(self.iw, self.y):
-                        f.write(f"{x}\t{y}\n")
+                    mask = np.ones_like(x_arr, dtype=bool)
+            except Exception:
+                x_arr = np.asarray(self.iw, dtype=float)
+                mask = np.ones_like(x_arr, dtype=bool)
+
+            x_sel = x_arr[mask]
+            y_sel = np.asarray(self.y, dtype=float)[mask]
+
+            # determine fitted values for the selected points
+            y_fit = None
+            if getattr(self, 'last_y_model', None) is not None:
+                try:
+                    y_model_arr = np.asarray(self.last_y_model, dtype=float)
+                    if y_model_arr.size == x_arr.size:
+                        y_fit = y_model_arr[mask]
+                except Exception:
+                    y_fit = None
+
+            if y_fit is None:
+                # try to recompute model from current param_config
+                try:
+                    params = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
+                    integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+                    grid_size = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+                    ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+                    ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+                    y_full = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel')
+                    y_fit = np.asarray(y_full, dtype=float)[mask]
+                except Exception:
+                    y_fit = np.full_like(x_sel, np.nan, dtype=float)
+
+            # prepare parameter block (prefer last fit output fitted values and errs)
+            params_out = {}
+            errs_out = {}
+            if getattr(self, 'last_fit_out', None) is not None:
+                out = self.last_fit_out
+                params_out = out.get('fitted') or out.get('params') or {}
+                errs_out = out.get('errs') or {}
+            if not params_out:
+                # fall back to current param_config values
+                try:
+                    params_out = {name: info.get('value', None) for name, info in self.param_config.items()}
+                except Exception:
+                    params_out = {}
+
+            with open(path, 'w', encoding='utf-8') as f:
+                # header comment block with metadata and parameters
+                f.write(f"# Exported by PeakFit GUI\n")
+                try:
+                    src = getattr(self, 'current_data_path', '')
+                    f.write(f"# Source: {src}\n")
+                except Exception:
+                    pass
+                try:
+                    if x_sel.size > 0:
+                        f.write(f"# Range: {float(x_sel[0])} to {float(x_sel[-1])} (points={len(x_sel)})\n")
+                except Exception:
+                    pass
+                f.write("# Parameters:\n")
+                for k, v in params_out.items():
+                    try:
+                        val_str = sci_format(float(v), decimals=6)
+                    except Exception:
+                        val_str = str(v)
+                    std = errs_out.get(k, None)
+                    if std is not None:
+                        try:
+                            std_str = sci_format(float(std), decimals=6)
+                            f.write(f"# {k} = {val_str} +/- {std_str}\n")
+                        except Exception:
+                            f.write(f"# {k} = {val_str} +/- {std}\n")
+                    else:
+                        f.write(f"# {k} = {val_str}\n")
+
+                # column header
+                f.write("# x\texperimental\tfitted\n")
+                # data rows
+                for xi, yi, yf in zip(x_sel, y_sel, y_fit):
+                    try:
+                        f.write(f"{xi:.6g}\t{yi:.6g}\t{yf:.6g}\n")
+                    except Exception:
+                        f.write(f"{xi}\t{yi}\t{yf}\n")
+
             QtWidgets.QMessageBox.information(self, 'Saved', f'Saved data to {path}')
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', str(e))
@@ -1022,6 +1391,180 @@ class MainWindow(QMainWindow):
             QtWidgets.QMessageBox.information(self, 'Exported', f'HTML report saved to {path}')
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', f'Failed to export HTML: {e}')
+
+    def _show_kernel_info(self):
+        try:
+            k = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+            kl = str(k).strip().lower()
+            if kl in ('pcm_fano_bessel', 'sinc', 'bessel'):
+                txt = ("Kernel: PCM_Fano_Bessel (original Bessel/sinc-like)\n"
+                       "Fitting function: Y = y0 + N/((q^2 + 1)*L^3) * integral( kernel(ik, iw) d(ik) )\n"
+                       "w0 = sqrt(C + D*cos(ik*pi/2)) - b\n"
+                       "eps = 2*(iw - w0)/g0\n"
+                       "den = (sin(x) - x*cos(x))**2 / ik**4   with x = (ik*pi/a)*L\n"
+                       "num = (eps + q)**2 / (1 + eps**2)\n"
+                       "Parameters: C, D, b, g0, q, a, L, N, y0")
+            else:
+                  txt = ("Kernel: PCM_Fano_Gauss (Gaussian-like envelope)\n"
+                      "Fitting function: Y = y0 + N*(L^3)/(q^2 + 1) * alpha^(-4/3) * integral( kernel(ik, iw) d(ik) )\n"
+                      "w0 = sqrt(C + D*cos(ik*pi/2)) - b\n"
+                      "eps = 2*(iw - w0)/g0\n"
+                      "den = ik^2 * exp((-2*pi^2 * ik^2 * L^2)/(alpha*a^2))\n"
+                      "num = (eps + q)**2 / (1 + eps**2)\n"
+                      "Parameters: C, D, b, g0, q, a, L, alpha, N, y0")
+            QtWidgets.QMessageBox.information(self, 'Kernel info', txt)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'Error', f'Failed to show kernel info: {e}')
+        except Exception:
+            pass
+
+    def _on_kernel_changed(self, txt: str):
+        sel = str(txt).strip().lower()
+        # Initialize parameter set for the selected kernel. This will
+        # populate the parameter table with sensible starting values.
+        try:
+            if 'gauss' in sel:
+                params_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'params_gauss.json'))
+                if os.path.exists(params_path):
+                    try:
+                        cfg = load_param_config(params_path)
+                        self.param_config = cfg
+                    except Exception:
+                        self.param_config = copy.deepcopy(GAUSS_DEFAULT_PARAMS)
+                else:
+                    self.param_config = copy.deepcopy(GAUSS_DEFAULT_PARAMS)
+            else:
+                params_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'params_bessel.json'))
+                if os.path.exists(params_path):
+                    try:
+                        cfg = load_param_config(params_path)
+                        self.param_config = cfg
+                    except Exception:
+                        # fallback to default_params.json
+                        dp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'default_params.json'))
+                        if os.path.exists(dp):
+                            try:
+                                self.param_config = load_param_config(dp)
+                            except Exception:
+                                self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                        else:
+                            self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                else:
+                    dp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'default_params.json'))
+                    if os.path.exists(dp):
+                        try:
+                            self.param_config = load_param_config(dp)
+                        except Exception:
+                            self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                    else:
+                        self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+            try:
+                self._populate_param_table()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _ensure_param_config_initialized(self):
+        """Ensure `self.param_config` is populated. Prefer project config
+        files in `configs/` where available; otherwise use embedded defaults.
+        Returns the resulting config dict."""
+        if isinstance(self.param_config, dict) and self.param_config:
+            return self.param_config
+        sel = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+        sel = str(sel).strip().lower()
+        try:
+            if 'gauss' in sel:
+                params_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'params_gauss.json'))
+                if os.path.exists(params_path):
+                    try:
+                        cfg = load_param_config(params_path)
+                        self.param_config = cfg
+                    except Exception:
+                        self.param_config = copy.deepcopy(GAUSS_DEFAULT_PARAMS)
+                else:
+                    self.param_config = copy.deepcopy(GAUSS_DEFAULT_PARAMS)
+            else:
+                params_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'params_bessel.json'))
+                if os.path.exists(params_path):
+                    try:
+                        cfg = load_param_config(params_path)
+                        self.param_config = cfg
+                    except Exception:
+                        dp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'default_params.json'))
+                        if os.path.exists(dp):
+                            try:
+                                self.param_config = load_param_config(dp)
+                            except Exception:
+                                self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                        else:
+                            self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                else:
+                    dp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'configs', 'default_params.json'))
+                    if os.path.exists(dp):
+                        try:
+                            self.param_config = load_param_config(dp)
+                        except Exception:
+                            self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+                    else:
+                        self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
+            try:
+                self._populate_param_table()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return self.param_config
+
+    def _apply_fit_range(self):
+        try:
+            # validate and refresh preview to show highlighted range
+            if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                x0 = int(self.fit_xmin_spin.value())
+                x1 = int(self.fit_xmax_spin.value())
+                if x0 > x1:
+                    # swap to sensible order
+                    self.fit_xmin_spin.setValue(int(x1))
+                    self.fit_xmax_spin.setValue(int(x0))
+            # re-render preview to show the selected range shading
+            self._render_preview(y_model=getattr(self, 'last_y_model', None))
+        except Exception:
+            pass
+
+    def normalize_data(self):
+        try:
+            if self.iw is None or self.y is None:
+                QtWidgets.QMessageBox.warning(self, 'Warning', 'Load data first')
+                return
+            y_arr = np.asarray(self.y, dtype=float)
+            ymin = float(np.min(y_arr))
+            ymax = float(np.max(y_arr))
+            if ymax == ymin:
+                QtWidgets.QMessageBox.warning(self, 'Warning', 'Data has zero dynamic range; cannot normalize')
+                return
+            new_y = (y_arr - ymin) / (ymax - ymin)
+            self.y = new_y
+            # If we have a last model displayed, scale it the same way so overlay stays useful
+            try:
+                if getattr(self, 'last_y_model', None) is not None:
+                    ly = np.asarray(self.last_y_model, dtype=float)
+                    if ly.size == y_arr.size:
+                        self.last_y_model = (ly - ymin) / (ymax - ymin)
+                    else:
+                        self.last_y_model = None
+            except Exception:
+                self.last_y_model = None
+            # Update plot
+            try:
+                self._render_preview(y_model=self.last_y_model if getattr(self, 'last_y_model', None) is not None else None)
+                try:
+                    self.fit_status.setPlainText('Data normalized to [0,1]')
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, 'Error', f'Normalization failed: {e}')
 
 
 def main():
