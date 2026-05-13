@@ -1,0 +1,9 @@
+# Exported by PeakFit GUI
+# Source: synthetic_test
+# Range: 0.0 to 0.0 (points=1)
+# Parameters:
+# a = 0.500000
+# N = 1.000000
+# y0 = 0.000000e+00
+# x	experimental	fitted	residual
+0	-0.0208379	0	-0.0208379

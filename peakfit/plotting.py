@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: float = None,
              output_html: str = "fit_plot.html", show: bool = True,
              converged: Optional[bool] = None, convergence_message: Optional[str] = None,
-             assets_dir: Optional[str] = None):
+             assets_dir: Optional[str] = None, kernel: Optional[str] = None):
     """Create an HTML output with plots on the left and the math definition on the right.
 
     If `assets_dir` is provided and exists, the generated HTML will reference
@@ -79,17 +79,29 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     table_html_lines.append('</tbody></table></div>')
     table_html = '\n'.join(table_html_lines)
 
-    # Math expression block (LaTeX) explaining the model; ensure the explanatory sentence
-    # is inside the math delimiters so KaTeX renders it.
-    math_latex = r"""$$
+    # Math expression block (LaTeX) explaining the model. Select kernel-specific
+    # formulas when a kernel name is provided; otherwise fall back to the
+    # canonical Bessel form.
+    kern = (kernel or '').strip().lower()
+    if 'gauss' in kern:
+        math_latex = r"""$$
+  \begin{aligned}
+  w_0(\kappa) &= \sqrt{C + D\cos\left(\frac{\pi\kappa}{2}\right)} - b,\\
+  \varepsilon(\omega,\kappa) &= \frac{2(\omega - w_0(\kappa))}{g_0},\\
+  \mathrm{num}(\omega,\kappa) &= \frac{(\varepsilon + q)^2}{1+\varepsilon^2},\\
+  \mathrm{den}(\kappa) &= \kappa^{2}\,\exp\left(-\frac{2\pi^{2}\kappa^{2}L^{2}}{\alpha a^{2}}\right),\\
+  y(\omega) &= y_0 + \frac{N\,L^{3}}{q^{2}+1}\,\alpha^{-4/3}\,\displaystyle\int_{0}^{1} \mathrm{num}(\omega,\kappa)\,\mathrm{den}(\kappa)\,d\kappa.
+  \end{aligned}
+  $$"""
+    else:
+        math_latex = r"""$$
   \begin{aligned}
   w_0(\kappa) &= \sqrt{C + D\cos\left(\frac{\pi\kappa}{2}\right)} - b,\\
   \varepsilon(\omega,\kappa) &= \frac{2(\omega - w_0(\kappa))}{g_0},\\
   \mathrm{num}(\omega,\kappa) &= \frac{(\varepsilon + q)^2}{1+\varepsilon^2},\\
   x(\kappa) &= \frac{\pi L}{a}\,\kappa,\\
-  \mathrm{den}(\kappa) &= \frac{(\sin x - x\cos x)^2}{\kappa^4},\\
-  \mathrm{integrand}(\omega,\kappa) &= \mathrm{den}(\kappa)\,\mathrm{num}(\omega,\kappa),\\
-    y(\omega) &= N\int_{0}^{1} \mathrm{integrand}(\omega,\kappa)\,d\kappa + y_0.
+  \mathrm{den}(\kappa) &= \frac{(\sin x - x\cos x)^2}{\kappa^{4}},\\
+  y(\omega) &= y_0 + \frac{N}{(q^{2}+1)\,L^{3}}\,\displaystyle\int_{0}^{1} \mathrm{num}(\omega,\kappa)\,\mathrm{den}(\kappa)\,d\kappa.
   \end{aligned}
   $$"""
     math_block = f'<div id="math-block">{math_latex}</div>'

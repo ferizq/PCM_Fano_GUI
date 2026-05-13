@@ -1325,13 +1325,17 @@ class MainWindow(QMainWindow):
                         f.write(f"# {k} = {val_str}\n")
 
                 # column header
-                f.write("# x\texperimental\tfitted\n")
-                # data rows
-                for xi, yi, yf in zip(x_sel, y_sel, y_fit):
+                f.write("# x\texperimental\tfitted\tresidual\n")
+                # data rows (include residual = experimental - fitted)
+                try:
+                    resid_arr = (np.asarray(y_sel, dtype=float) - np.asarray(y_fit, dtype=float))
+                except Exception:
+                    resid_arr = [float('nan')] * len(x_sel)
+                for xi, yi, yf, yr in zip(x_sel, y_sel, y_fit, resid_arr):
                     try:
-                        f.write(f"{xi:.6g}\t{yi:.6g}\t{yf:.6g}\n")
+                        f.write(f"{xi:.6g}\t{yi:.6g}\t{yf:.6g}\t{yr:.6g}\n")
                     except Exception:
-                        f.write(f"{xi}\t{yi}\t{yf}\n")
+                        f.write(f"{xi}\t{yi}\t{yf}\t{yr}\n")
 
             QtWidgets.QMessageBox.information(self, 'Saved', f'Saved data to {path}')
         except Exception as e:
@@ -1384,10 +1388,58 @@ class MainWindow(QMainWindow):
             msg = out.get('message')
 
         try:
-            plot_fit(self.iw, self.y, self.last_y_model if getattr(self, 'last_y_model', None) is not None else np.zeros_like(self.y),
-                     params=params, param_errs=errs, r2=r2,
+            # Respect the selected fit range: slice data/model to the selected x-range
+            try:
+                x_arr = np.asarray(self.iw, dtype=float)
+                y_arr = np.asarray(self.y, dtype=float)
+                if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                    x0 = float(self.fit_xmin_spin.value())
+                    x1 = float(self.fit_xmax_spin.value())
+                    if x0 > x1:
+                        x0, x1 = x1, x0
+                    mask = (x_arr >= x0) & (x_arr <= x1)
+                    if not np.any(mask):
+                        QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to export')
+                        return
+                else:
+                    mask = np.ones_like(x_arr, dtype=bool)
+            except Exception:
+                x_arr = np.asarray(self.iw)
+                y_arr = np.asarray(self.y)
+                mask = np.ones_like(x_arr, dtype=bool)
+
+            iw_sel = x_arr[mask]
+            y_sel = y_arr[mask]
+
+            # Prepare parameters for plotting (prefer last fit output, fallback to param_config)
+            params_plot = params if params is not None else ({name: info.get('value', 0.0) for name, info in self.param_config.items()} if isinstance(self.param_config, dict) else None)
+
+            # Compute fitted model across full x grid and slice to match selection so plots align
+            y_full = None
+            kernel = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None
+            integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+            grid_size = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+            ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+            ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+            try:
+                if params_plot is not None:
+                    y_full = compute_model(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel)
+            except Exception:
+                y_full = None
+
+            if y_full is None:
+                # fallback to last_y_model when recompute fails
+                if getattr(self, 'last_y_model', None) is not None and np.asarray(self.last_y_model).size == np.asarray(self.iw).size:
+                    y_full = np.asarray(self.last_y_model)
+                else:
+                    y_full = np.zeros_like(x_arr)
+
+            y_model_sel = np.asarray(y_full)[mask]
+
+            plot_fit(iw_sel, y_sel, y_model_sel,
+                     params=params_plot, param_errs=errs, r2=r2,
                      output_html=path, show=False, converged=converged, convergence_message=msg,
-                     assets_dir=self.assets_dir)
+                     assets_dir=self.assets_dir, kernel=kernel)
             QtWidgets.QMessageBox.information(self, 'Exported', f'HTML report saved to {path}')
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', f'Failed to export HTML: {e}')
