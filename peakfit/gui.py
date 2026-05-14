@@ -32,7 +32,7 @@ try:
 except Exception as e:
     raise ImportError("PySide6 and QtWebEngine are required to run the GUI: " + str(e))
 
-from .io import load_data, load_param_config
+from .io import load_data, load_param_config, normalize_number_string
 from .fitting import fit_with_lmfit, fit_with_scipy, _build_free_params, _params_from_vector
 from .model import model as compute_model
 
@@ -40,28 +40,28 @@ from .model import model as compute_model
 # selects a kernel. These mirror the values used in the test fixtures /
 # `params_gauss.json` (embedded here so the GUI can self-initialize).
 GAUSS_DEFAULT_PARAMS = {
-    'C':   {'value': 171400.0, 'vary': False, 'min': None, 'max': None},
-    'D':   {'value': 100000.0, 'vary': False, 'min': None, 'max': None},
-    'b':   {'value': 0.0, 'vary': True, 'min': None, 'max': None},
-    'g0':  {'value': 4.5, 'vary': True, 'min': 1e-6, 'max': 10.0},
-    'q':   {'value': 2.0, 'vary': True, 'min': -1000.0, 'max': 1000.0},
-    'a':   {'value': 0.5431, 'vary': False, 'min': 0.1, 'max': 0.6},
-    'L':   {'value': 10.0, 'vary': True, 'min': 1.0, 'max': 100.0},
-    'alpha': {'value': 1.0, 'vary': False, 'min': 0.0, 'max': None},
-    'N':   {'value': 1.0, 'vary': True, 'min': 0.0, 'max': 1e9},
-    'y0':  {'value': 0.0, 'vary': True, 'min': -1e9, 'max': 1e9},
+    'alpha': {'value': 9.67, 'vary': False, 'min': 1.0, 'max': 100.0},
+    'C':   {'value': 171400.0, 'vary': False, 'min': 171400.0, 'max': 171410.0},
+    'D':   {'value': 100000.0, 'vary': False, 'min': 100000.0, 'max': 100010.0},
+    'b':   {'value': 0.0, 'vary': False, 'min': -10.0, 'max': 10.0},
+    'g0':  {'value': 4.5, 'vary': False, 'min': 1.0, 'max': 10.0},
+    'q':   {'value': -1.0e12, 'vary': False, 'min': -1.0e12, 'max': 1.0e12},
+    'a':   {'value': 0.5431, 'vary': False, 'min': 0.54, 'max': 0.55},
+    'L':   {'value': 10.0, 'vary': False, 'min': 5.0, 'max': 50.0},
+    'N':   {'value': 1.0, 'vary': True, 'min': 1e-20, 'max': 1e+20},
+    'y0':  {'value': 0.0, 'vary': True, 'min': -10000.0, 'max': 10000.0},
 }
 
 BESSEL_DEFAULT_PARAMS = {
-    'C':   {'value': 171400.0, 'vary': False, 'min': None, 'max': None},
-    'D':   {'value': 100000.0, 'vary': False, 'min': None, 'max': None},
-    'b':   {'value': 0.0, 'vary': True, 'min': None, 'max': None},
-    'g0':  {'value': 4.5, 'vary': True, 'min': 1e-6, 'max': 10.0},
-    'q':   {'value': 2.0, 'vary': True, 'min': -1000.0, 'max': 1000.0},
-    'a':   {'value': 0.5431, 'vary': False, 'min': 0.1, 'max': 0.6},
-    'L':   {'value': 10.0, 'vary': True, 'min': 1.0, 'max': 100.0},
-    'N':   {'value': 1.0, 'vary': True, 'min': 0.0, 'max': 1e9},
-    'y0':  {'value': 0.0, 'vary': True, 'min': -1e9, 'max': 1e9},
+    'C':   {'value': 171400.0, 'vary': False, 'min': 171400.0, 'max': 171410.0},
+    'D':   {'value': 100000.0, 'vary': False, 'min': 100000.0, 'max': 100010.0},
+    'b':   {'value': 0.0, 'vary': False, 'min': -10.0, 'max': 10.0},
+    'g0':  {'value': 4.5, 'vary': False, 'min': 1.0, 'max': 10.0},
+    'q':   {'value': -1.0e12, 'vary': False, 'min': -1.0e12, 'max': 1.0e12},
+    'a':   {'value': 0.5431, 'vary': False, 'min': 0.54, 'max': 0.55},
+    'L':   {'value': 10.0, 'vary': False, 'min': 5.0, 'max': 50.0},
+    'N':   {'value': 1.0, 'vary': True, 'min': 1e-20, 'max': 1e+20},
+    'y0':  {'value': 0.0, 'vary': True, 'min': -10000.0, 'max': 10000.0},
 }
 
 
@@ -597,16 +597,19 @@ class MainWindow(QMainWindow):
                 mx = self.table.item(r, 5).text() if self.table.item(r, 5) is not None else ''
             entry = {}
             try:
-                entry['value'] = float(val)
+                vs = normalize_number_string(val)
+                entry['value'] = float(vs)
             except Exception:
                 entry['value'] = float('nan')
             entry['vary'] = bool(cb.isChecked()) if cb is not None else True
             try:
-                entry['min'] = float(mn)
+                ms = normalize_number_string(mn)
+                entry['min'] = float(ms)
             except Exception:
                 entry['min'] = None
             try:
-                entry['max'] = float(mx)
+                xs = normalize_number_string(mx)
+                entry['max'] = float(xs)
             except Exception:
                 entry['max'] = None
             cfg[name] = entry
