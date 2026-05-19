@@ -14,12 +14,14 @@ from typing import Optional
 import os
 import numpy as np
 import plotly.graph_objects as go
+from .model import model_components
 
 
 def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: float = None,
              output_html: str = "fit_plot.html", show: bool = True,
              converged: Optional[bool] = None, convergence_message: Optional[str] = None,
-             assets_dir: Optional[str] = None, kernel: Optional[str] = None):
+             assets_dir: Optional[str] = None, kernel: Optional[str] = None,
+             x_range: Optional[tuple] = None):
     """Create an HTML output with plots on the left and the math definition on the right.
 
     If `assets_dir` is provided and exists, the generated HTML will reference
@@ -45,16 +47,73 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         # Use HTML superscript for R^2 in the table
         param_rows.append(("R<sup>2</sup>", f"{r2:.6g}", ""))
 
-    # Main figure: data + fit (fixed height)
+    # Main figure: data + fit (fixed height). If `params` contains an
+    # additive Gaussian component compute and plot components separately
     fig_main = go.Figure()
     fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6)))
-    fig_main.add_trace(go.Scatter(x=iw, y=y_model, mode='lines', name='fit', line=dict(width=2)))
-    fig_main.update_layout(title='Data and Fit', margin=dict(l=40, r=10, t=40, b=40), height=520)
+
+    # Attempt to compute model components (base integral and gaussian)
+    base = None
+    gauss = None
+    y_model_calc = None
+    if params is not None:
+      try:
+        base, gauss = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel)
+        y_model_calc = np.asarray(base) + np.asarray(gauss)
+      except Exception:
+        base = None
+        gauss = None
+        y_model_calc = None
+
+    if y_model_calc is not None:
+      # If we have separate components, show them as distinct traces
+      try:
+        has_gauss = np.any(np.asarray(gauss) != 0.0)
+      except Exception:
+        has_gauss = False
+      # Integral / PCM component
+      fig_main.add_trace(go.Scatter(x=iw, y=base, mode='lines', name='integral component', line=dict(width=2, dash='dash')))
+      # Gaussian component (may be zero)
+      fig_main.add_trace(go.Scatter(x=iw, y=gauss, mode='lines', name='gaussian component', line=dict(width=2, dash='dot')))
+      # Sum (fit)
+      fig_main.add_trace(go.Scatter(x=iw, y=y_model_calc, mode='lines', name='fit', line=dict(width=3)))
+    else:
+      # fallback: plot provided model array
+      fig_main.add_trace(go.Scatter(x=iw, y=y_model, mode='lines', name='fit', line=dict(width=2)))
+    fig_main.update_layout(
+      title='Data and Fit',
+      margin=dict(l=40, r=10, t=80, b=40),
+      height=520,
+      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
 
     # Residuals figure (fixed height)
     fig_resid = go.Figure()
     fig_resid.add_trace(go.Scatter(x=iw, y=residuals, mode='markers', name='residuals', marker=dict(size=4)))
     fig_resid.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240)
+
+    # If the caller provided an explicit x_range use it for both main and residuals
+    if x_range is not None:
+      try:
+        lo, hi = x_range
+        fig_main.update_xaxes(range=[float(lo), float(hi)])
+        fig_resid.update_xaxes(range=[float(lo), float(hi)])
+        # Autoscale residuals y-axis based on residuals inside the x_range
+        try:
+            mask = (np.asarray(iw) >= float(lo)) & (np.asarray(iw) <= float(hi))
+            if np.any(mask):
+                resid_mask = residuals[mask]
+                ymin = float(np.min(resid_mask))
+                ymax = float(np.max(resid_mask))
+                if ymin == ymax:
+                    ymin -= 1e-6
+                    ymax += 1e-6
+                pad = max(1e-6, 0.05 * (ymax - ymin))
+                fig_resid.update_yaxes(range=[ymin - pad, ymax + pad])
+        except Exception:
+            pass
+      except Exception:
+        pass
 
     # Convert figures to HTML fragments. If local assets are available we will
     # reference them; otherwise embed Plotly into the main fragment so the

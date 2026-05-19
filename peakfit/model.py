@@ -26,11 +26,20 @@ def _get(params: Dict[str, Any], name: str, default: Any):
     """
     if params is None:
         return float(default)
+    # direct match
     if name in params:
         return float(params.get(name))
+    # try a canonical form with underscores removed (some loaders strip underscores)
+    alt = name.replace('_', '')
+    if alt in params:
+        return float(params.get(alt))
+    # legacy 'i' prefixed forms
     legacy = 'i' + name
     if legacy in params:
         return float(params.get(legacy))
+    legacy_alt = 'i' + alt
+    if legacy_alt in params:
+        return float(params.get(legacy_alt))
     return float(default)
 
 
@@ -118,6 +127,19 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
 
     Returns y = N * integral_{ik=ik_min..ik_max} kernel_integrand(ik, iw, params) d(ik) + y0
     """
+    base, gauss = model_components(iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, quad_opts=quad_opts, kernel=kernel)
+    return base + gauss
+
+
+def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int = 4000,
+                     ik_min: float = 0.0, ik_max: float = 1.0, quad_opts: Optional[Dict] = None,
+                     kernel: str = 'PCM_Fano_Bessel'):
+    """Compute the model components separately.
+
+    Returns a tuple `(base, gauss)` where `base` is the integral-derived
+    contribution (including `y0` and `N` scaling) and `gauss` is the optional
+    additive Gaussian peak (may be all zeros when not provided).
+    """
     iw_arr = np.atleast_1d(iw).astype(float)
 
     # Compute the integral over ik using the requested integrator
@@ -126,7 +148,6 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
         ik_mesh = ik[:, None]
         iw_mesh = iw_arr[None, :]
         vals = kernel_integrand(ik_mesh, iw_mesh, params, kernel=kernel)
-        # Manual trapezoidal integration along the ik axis to avoid depending on np.trapz
         dx = np.diff(ik)
         integral = np.sum((vals[1:, :] + vals[:-1, :]) * (dx[:, None]) / 2.0, axis=0)
     elif integrator == "quad":
@@ -161,14 +182,12 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
         denom = (q_for_denom ** 2 + 1.0)
         if denom == 0.0:
             denom = 1e-24
-        # apply alpha scaling factor: multiply by alpha^(-4/3)
         alpha_for_scale = float(_get(params, 'alpha', 1.0))
         if alpha_for_scale <= 0.0:
             alpha_for_scale = 1e-24
         alpha_factor = alpha_for_scale ** (-4.0 / 3.0)
         base = y0 + (N * (L_for_denom ** 3) / denom) * alpha_factor * integral
     else:
-        # Fallback to previous conservative scaling
         denom = (q_for_denom ** 2 + 1.0) * (L_for_denom ** 3)
         if denom == 0.0:
             denom = 1e-24
@@ -185,4 +204,4 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
     except Exception:
         gauss = np.zeros_like(iw_arr, dtype=float)
 
-    return base + gauss
+    return base, gauss

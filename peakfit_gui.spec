@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['scripts\\gui_app.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=[],
-    datas=[('E:\\VS_CODE\\PCM_Fano_GUI\\configs\\default_params.json', 'configs')],
-    hiddenimports=['lmfit', 'plotly'],
+    datas=[('configs\\default_params.json', 'configs')],
+    hiddenimports=['lmfit', 'plotly', 'PySide6', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

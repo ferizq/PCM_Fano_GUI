@@ -32,9 +32,9 @@ try:
 except Exception as e:
     raise ImportError("PySide6 and QtWebEngine are required to run the GUI: " + str(e))
 
-from .io import load_data, load_param_config
+from .io import load_data, load_param_config, normalize_number_string
 from .fitting import fit_with_lmfit, fit_with_scipy, _build_free_params, _params_from_vector
-from .model import model as compute_model
+from .model import model as compute_model, model_components
 
 # Built-in default parameter sets used to initialize the GUI when the user
 # selects a kernel. These mirror the values used in the test fixtures /
@@ -479,7 +479,13 @@ class MainWindow(QMainWindow):
         # remember and display the loaded file path (basename)
         try:
             self.current_data_path = path
-            self.loaded_file_label.setText(os.path.basename(path) if path is not None else '')
+            # show filename plus number of points and x-range to aid debugging
+            try:
+                npts = len(self.iw) if self.iw is not None else 0
+                self.loaded_file_label.setText(f"{os.path.basename(path)} ({npts} pts, {xmin:.6g}-{xmax:.6g})")
+                print(f"Loaded {npts} points from {path}; x range {xmin}-{xmax}", flush=True)
+            except Exception:
+                self.loaded_file_label.setText(os.path.basename(path) if path is not None else '')
         except Exception:
             pass
         self._render_preview()
@@ -605,31 +611,20 @@ class MainWindow(QMainWindow):
             else:
                 mx = self.table.item(r, 5).text() if self.table.item(r, 5) is not None else ''
             entry = {}
-            # Normalize user-entered numeric strings (accept comma as decimal)
-            def _sanitize_num_str(s):
-                try:
-                    if s is None:
-                        return ''
-                    if isinstance(s, str):
-                        return s.strip().replace(',', '.')
-                    return s
-                except Exception:
-                    return s
-
             try:
-                sval = _sanitize_num_str(val)
-                entry['value'] = float(sval)
+                sval = normalize_number_string(val)
+                entry['value'] = float(sval) if sval != '' else float('nan')
             except Exception:
                 entry['value'] = float('nan')
             entry['vary'] = bool(cb.isChecked()) if cb is not None else True
             try:
-                smn = _sanitize_num_str(mn)
-                entry['min'] = float(smn)
+                smn = normalize_number_string(mn)
+                entry['min'] = float(smn) if smn != '' else None
             except Exception:
                 entry['min'] = None
             try:
-                smx = _sanitize_num_str(mx)
-                entry['max'] = float(smx)
+                smx = normalize_number_string(mx)
+                entry['max'] = float(smx) if smx != '' else None
             except Exception:
                 entry['max'] = None
             cfg[name] = entry
@@ -1086,9 +1081,37 @@ class MainWindow(QMainWindow):
         x_data = list(map(float, np.asarray(self.iw)))
         y_data = list(map(float, np.asarray(self.y)))
         main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6)))
-        if y_model is not None:
-            y_model_list = list(map(float, np.asarray(y_model)))
-            main_fig.add_trace(go.Scatter(x=x_data, y=y_model_list, mode='lines', name='fit', line=dict(width=2)))
+
+        # If the Gaussian checkbox is enabled, compute and plot separate
+        # components (integral/base and gaussian) and their sum. Otherwise
+        # fall back to plotting the provided y_model array.
+        plotted_model = False
+        try:
+            params_for_model = {name: info.get('value', 0.0) for name, info in self.param_config.items()} if isinstance(self.param_config, dict) else None
+        except Exception:
+            params_for_model = None
+        if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and params_for_model is not None:
+            try:
+                grid_sz = int(self.preview_spin.value()) if hasattr(self, 'preview_spin') else 100
+                integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+                ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+                ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+                base_comp, gauss_comp = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
+                base_list = list(map(float, np.asarray(base_comp)))
+                gauss_list = list(map(float, np.asarray(gauss_comp)))
+                sum_list = list(map(float, np.asarray(base_comp) + np.asarray(gauss_comp)))
+                main_fig.add_trace(go.Scatter(x=x_data, y=base_list, mode='lines', name='integral component', line=dict(width=2, dash='dash')))
+                main_fig.add_trace(go.Scatter(x=x_data, y=gauss_list, mode='lines', name='gaussian component', line=dict(width=2, dash='dot')))
+                main_fig.add_trace(go.Scatter(x=x_data, y=sum_list, mode='lines', name='fit', line=dict(width=3)))
+                plotted_model = True
+            except Exception:
+                plotted_model = False
+        if not plotted_model and y_model is not None:
+            try:
+                y_model_list = list(map(float, np.asarray(y_model)))
+                main_fig.add_trace(go.Scatter(x=x_data, y=y_model_list, mode='lines', name='fit', line=dict(width=2)))
+            except Exception:
+                pass
         # If a fit-range is specified, highlight it on the main plot
         try:
             if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
@@ -1098,7 +1121,13 @@ class MainWindow(QMainWindow):
                     main_fig.add_vrect(x0=x0, x1=x1, fillcolor='LightSalmon', opacity=0.2, layer='below', line_width=0)
         except Exception:
             pass
-        main_fig.update_layout(title='Data and Fit', margin=dict(l=40, r=10, t=40, b=40), height=520, showlegend=False)
+        main_fig.update_layout(
+            title='Data and Fit',
+            margin=dict(l=40, r=10, t=80, b=40),
+            height=520,
+            showlegend=True,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+        )
 
         # Determine selected fit-range mask (if any) and whether to rescale
         try:
@@ -1119,30 +1148,60 @@ class MainWindow(QMainWindow):
         except Exception:
             mask = None
 
-        # Residuals: restrict to selected mask if present
+        # Residuals: compute across the full x-range even if a fit-range
+        # (mask) was used when fitting. Prefer an explicit full-length
+        # `y_model` argument, then `self.last_y_model`, then attempt a
+        # recompute from the last fit output or current param_config.
         res_fig = go.Figure()
         try:
-            if y_model is not None:
-                y_model_arr = np.asarray(y_model)
+            y_model_arr = None
+            try:
+                if y_model is not None and np.asarray(y_model).size == x_arr.size:
+                    y_model_arr = np.asarray(y_model, dtype=float)
+            except Exception:
+                y_model_arr = None
+
+            if y_model_arr is None:
+                try:
+                    if getattr(self, 'last_y_model', None) is not None and np.asarray(self.last_y_model).size == x_arr.size:
+                        y_model_arr = np.asarray(self.last_y_model, dtype=float)
+                except Exception:
+                    y_model_arr = None
+
+            if y_model_arr is None:
+                # Try to recompute from last fit output or current params
+                params_try = None
+                if getattr(self, 'last_fit_out', None) is not None:
+                    out = self.last_fit_out
+                    params_try = out.get('fitted') or out.get('params') or None
+                if params_try is None:
+                    try:
+                        params_try = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
+                    except Exception:
+                        params_try = None
+                if params_try is not None:
+                    try:
+                        grid_sz = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+                        integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+                        ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+                        ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+                        y_full_try = compute_model(self.iw, params_try, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
+                        if np.asarray(y_full_try).size == x_arr.size:
+                            y_model_arr = np.asarray(y_full_try, dtype=float)
+                    except Exception:
+                        y_model_arr = None
+
+            if y_model_arr is not None:
                 resid_arr = y_arr - y_model_arr
-                if mask is not None:
-                    res_x = list(map(float, x_arr[mask]))
-                    res_y = list(map(float, resid_arr[mask]))
-                else:
-                    res_x = list(map(float, x_arr))
-                    res_y = list(map(float, resid_arr))
+                res_x = list(map(float, x_arr))
+                res_y = list(map(float, resid_arr))
                 if len(res_x) > 0:
                     res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
             else:
-                # no model: plot nothing or empty residuals within mask
-                if mask is not None:
-                    res_x = list(map(float, x_arr[mask]))
-                    res_y = [0.0] * len(res_x)
-                    if len(res_x) > 0:
-                        res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
+                # no model available: show zero-line residuals across full x
+                res_fig.add_trace(go.Scatter(x=x_data, y=[0.0] * len(x_data), mode='markers', name='residuals', marker=dict(size=4)))
         except Exception:
             try:
-                # fallback: plot full-range zero residuals
                 res_fig.add_trace(go.Scatter(x=x_data, y=[0.0] * len(x_data), mode='markers', name='residuals', marker=dict(size=4)))
             except Exception:
                 pass
@@ -1175,13 +1234,36 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
-        # Force residual x-axis to the selected range when mask present
+        # Autoscale residuals y-axis using residuals inside the selected mask
+        # (so the residual plot range reflects the fit region), but show the
+        # full x-range unless the user asked to rescale the plot to the range.
         try:
-            if mask is not None and np.any(mask):
+            res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
+            if mask is not None and np.any(mask) and y_model is not None:
+                try:
+                    y_model_arr = np.asarray(y_model)
+                    resid_full = y_arr - y_model_arr
+                    resid_mask = resid_full[mask]
+                    if resid_mask.size > 0:
+                        ymin = float(np.min(resid_mask))
+                        ymax = float(np.max(resid_mask))
+                        if ymin == ymax:
+                            ymin -= 1e-6
+                            ymax += 1e-6
+                        pad = max(1e-6, 0.05 * (ymax - ymin))
+                        res_fig.update_yaxes(range=[ymin - pad, ymax + pad])
+                except Exception:
+                    pass
+            # Optionally restrict residual x-axis to the selected range when the
+            # 'Rescale plot to range' checkbox is checked. Otherwise leave the
+            # residuals showing across the full spectrum.
+            if mask is not None and np.any(mask) and getattr(self, 'rescale_cb', None) and self.rescale_cb.isChecked():
                 res_fig.update_xaxes(range=[float(x0), float(x1)])
         except Exception:
-            pass
+            try:
+                res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
+            except Exception:
+                pass
 
         main_div = main_fig.to_html(full_html=False, include_plotlyjs=False)
         resid_div = res_fig.to_html(full_html=False, include_plotlyjs=False)
@@ -1227,7 +1309,7 @@ class MainWindow(QMainWindow):
         if plotly_head is None:
             plotly_head = '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>'
 
-                html = f"""<!doctype html>
+        html = f"""<!doctype html>
 <html>
     <head>
         <meta charset="utf-8">
@@ -1238,15 +1320,15 @@ class MainWindow(QMainWindow):
         <script defer src="{katex_autorender}"></script>
         <style> body {{ font-family: Arial, sans-serif; margin:10px; }} table {{ width:100%; border-collapse:collapse; }} td, th {{ border:1px solid #ddd; padding:6px; }}</style>
     </head>
-        <body>
-                <div class="main">{main_div}</div>
-                <div class="resid">{resid_div}</div>
-                <div class="math">{math_block}</div>
-        </body>
+    <body>
+        <div class="main">{main_div}</div>
+        <div class="resid">{resid_div}</div>
+        <div class="math">{math_block}</div>
+    </body>
 </html>"""
 
-                # small JS to sync the main plot's x-range to the residuals plot
-                sync_js = '''<script>
+        # small JS to sync the main plot's x-range to the residuals plot
+        sync_js = '''<script>
 (function(){
     function setupSync(){
         var plots = document.getElementsByClassName('plotly-graph-div');
@@ -1268,10 +1350,10 @@ class MainWindow(QMainWindow):
     if(document.readyState==='complete'){ setTimeout(setupSync, 100); } else { window.addEventListener('load', function(){ setTimeout(setupSync, 100); }); }
 })();
 </script>'''
-                try:
-                        html = html.replace('</body>', sync_js + '\n</body>')
-                except Exception:
-                        pass
+        try:
+            html = html.replace('</body>', sync_js + '\n</body>')
+        except Exception:
+            pass
 
         # remember last model for saving
         self.last_y_model = None if y_model is None else np.asarray(y_model)
@@ -1688,15 +1770,12 @@ class MainWindow(QMainWindow):
         try:
             if not isinstance(self.param_config, dict):
                 self.param_config = {}
-            # sensible defaults: amplitude zero, center at data midpoint if available
-            try:
-                x0_default = float(np.mean(np.asarray(self.iw))) if self.iw is not None else 0.0
-            except Exception:
-                x0_default = 0.0
+            # User-requested sensible defaults and bounds for the extra Gaussian
+            # Use explicit defaults so the executable behavior is machine-independent.
             defaults = {
-                'N_g': {'value': 0.0, 'vary': True, 'min': 0.0, 'max': None},
-                'x0': {'value': x0_default, 'vary': True, 'min': None, 'max': None},
-                'gg': {'value': 1.0, 'vary': True, 'min': 1e-6, 'max': None},
+                'N_g': {'value': 0.1, 'vary': True, 'min': 0.0, 'max': 1.0},
+                'x0': {'value': 480.0, 'vary': True, 'min': 400.0, 'max': 500.0},
+                'gg': {'value': 10.0, 'vary': True, 'min': 5.0, 'max': 100.0},
             }
             for k, v in defaults.items():
                 if k not in self.param_config:
@@ -1746,12 +1825,49 @@ class MainWindow(QMainWindow):
             if self.iw is None or self.y is None:
                 QtWidgets.QMessageBox.warning(self, 'Warning', 'Load data first')
                 return
+            # Ask whether to normalize the full spectrum or use selected range
+            use_full = False
+            try:
+                dlg = QtWidgets.QMessageBox(self)
+                dlg.setWindowTitle('Normalize Range')
+                dlg.setText('Normalize full spectrum or using the selected range?')
+                full_btn = dlg.addButton('Full spectrum', QtWidgets.QMessageBox.AcceptRole)
+                sel_btn = dlg.addButton('Selected range', QtWidgets.QMessageBox.AcceptRole)
+                cancel_btn = dlg.addButton(QtWidgets.QMessageBox.Cancel)
+                dlg.exec()
+                clicked = dlg.clickedButton()
+                if clicked == cancel_btn:
+                    return
+                elif clicked == full_btn:
+                    use_full = True
+                else:
+                    use_full = False
+            except Exception:
+                use_full = True
+
             y_arr = np.asarray(self.y, dtype=float)
-            ymin = float(np.min(y_arr))
-            ymax = float(np.max(y_arr))
+            if use_full:
+                mask = np.ones_like(y_arr, dtype=bool)
+            else:
+                try:
+                    x_arr = np.asarray(self.iw, dtype=float)
+                    x0 = float(self.fit_xmin_spin.value()) if hasattr(self, 'fit_xmin_spin') else float(np.min(x_arr))
+                    x1 = float(self.fit_xmax_spin.value()) if hasattr(self, 'fit_xmax_spin') else float(np.max(x_arr))
+                    if x0 > x1:
+                        x0, x1 = x1, x0
+                    mask = (x_arr >= x0) & (x_arr <= x1)
+                    if not np.any(mask):
+                        QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to normalize')
+                        return
+                except Exception:
+                    mask = np.ones_like(y_arr, dtype=bool)
+
+            ymin = float(np.min(y_arr[mask]))
+            ymax = float(np.max(y_arr[mask]))
             if ymax == ymin:
-                QtWidgets.QMessageBox.warning(self, 'Warning', 'Data has zero dynamic range; cannot normalize')
+                QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected data has zero dynamic range; cannot normalize')
                 return
+            # Apply scaling computed from the selected region to the whole array
             new_y = (y_arr - ymin) / (ymax - ymin)
             self.y = new_y
             # If we have a last model displayed, scale it the same way so overlay stays useful
