@@ -203,6 +203,34 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         .replace('%%KATEX_JS%%', katex_js)
         .replace('%%KATEX_AUTORENDER%%', katex_autorender))
 
+    # Inject JS that syncs the main plot x-range to the residuals plot
+    sync_js = '''<script>
+(function(){
+  function setupSync(){
+    var plots = document.getElementsByClassName('plotly-graph-div');
+    if(!plots || plots.length < 2) return;
+    var main = plots[0], resid = plots[1];
+    function handler(eventdata){
+      try{
+        if(eventdata['xaxis.range[0]'] !== undefined && eventdata['xaxis.range[1]'] !== undefined){
+          Plotly.relayout(resid, {'xaxis.range':[eventdata['xaxis.range[0]'], eventdata['xaxis.range[1]']]});
+        } else if(eventdata['xaxis.range']){
+          Plotly.relayout(resid, {'xaxis.range':eventdata['xaxis.range']});
+        } else if(eventdata['xaxis.autorange'] === true){
+          Plotly.relayout(resid, {'xaxis.autorange': true});
+        }
+      }catch(e){}
+    }
+    try{ main.on('plotly_relayout', handler); }catch(e){}
+  }
+  if(document.readyState==='complete'){ setTimeout(setupSync, 100); } else { window.addEventListener('load', function(){ setTimeout(setupSync, 100); }); }
+})();
+</script>'''
+    try:
+        html = html.replace('</body>', sync_js + '\n</body>')
+    except Exception:
+        pass
+
     with open(output_html, 'w', encoding='utf-8') as f:
         f.write(html)
 

@@ -120,6 +120,7 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
     """
     iw_arr = np.atleast_1d(iw).astype(float)
 
+    # Compute the integral over ik using the requested integrator
     if integrator == "grid":
         ik = np.linspace(ik_min, ik_max, int(grid_size))
         ik_mesh = ik[:, None]
@@ -143,33 +144,45 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
     else:
         raise ValueError(f"Unknown integrator '{integrator}'. Use 'grid' or 'quad'.")
 
+    # Base parameters
     N = float(_get(params, 'N', 1.0))
     y0 = float(_get(params, 'y0', 0.0))
-    # Kernel-specific amplitude scaling:
-    # - PCM_Fano_Bessel: Y = y0 + N/((q^2 + 1)*L^3) * integral
-    # - PCM_Fano_Gauss:  Y = y0 + N*L^3/(q^2 + 1) * integral
     q_for_denom = float(_get(params, 'q', 0.0))
     L_for_denom = float(_get(params, 'L', 1.0))
+
+    # Kernel-specific amplitude scaling
     ksel = str(kernel).strip().lower() if kernel is not None else 'pcm_fano_bessel'
     if ksel in ('pcm_fano_bessel', 'sinc', 'bessel'):
         denom = (q_for_denom ** 2 + 1.0) * (L_for_denom ** 3)
         if denom == 0.0:
             denom = 1e-24
-        return y0 + (N / denom) * integral
+        base = y0 + (N / denom) * integral
     elif ksel in ('pcm_fano_gauss', 'exp', 'gauss', 'gaussian_exp'):
         denom = (q_for_denom ** 2 + 1.0)
         if denom == 0.0:
             denom = 1e-24
         # apply alpha scaling factor: multiply by alpha^(-4/3)
         alpha_for_scale = float(_get(params, 'alpha', 1.0))
-        # guard against non-positive alpha to avoid division by zero
         if alpha_for_scale <= 0.0:
             alpha_for_scale = 1e-24
         alpha_factor = alpha_for_scale ** (-4.0 / 3.0)
-        return y0 + (N * (L_for_denom ** 3) / denom) * alpha_factor * integral
+        base = y0 + (N * (L_for_denom ** 3) / denom) * alpha_factor * integral
     else:
         # Fallback to previous conservative scaling
         denom = (q_for_denom ** 2 + 1.0) * (L_for_denom ** 3)
         if denom == 0.0:
             denom = 1e-24
-        return (N / denom) * integral + y0
+        base = (N / denom) * integral + y0
+
+    # Optional additive Gaussian peak
+    try:
+        Ng = float(_get(params, 'N_g', 0.0))
+        x0g = float(_get(params, 'x0', 0.0))
+        gg = float(_get(params, 'gg', 0.0))
+        if gg == 0.0:
+            gg = 1e-24
+        gauss = Ng * np.exp(-4.0 * np.log(2.0) * ((iw_arr - x0g) ** 2) / (gg * gg))
+    except Exception:
+        gauss = np.zeros_like(iw_arr, dtype=float)
+
+    return base + gauss

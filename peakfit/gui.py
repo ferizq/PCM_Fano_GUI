@@ -346,6 +346,15 @@ class MainWindow(QMainWindow):
         left_l.addWidget(self.fit_status)
 
         left_l.addWidget(QLabel('Parameters'))
+        # Checkbox to enable an additional Gaussian peak (Ng, x0, gg)
+        try:
+            self.gauss_cb = QCheckBox('Enable additional Gaussian peak')
+            self.gauss_cb.setChecked(False)
+            self.gauss_cb.setToolTip('When checked, add an extra Gaussian peak (N_g, x0, gg) to the model')
+            self.gauss_cb.toggled.connect(self._toggle_gaussian)
+            left_l.addWidget(self.gauss_cb)
+        except Exception:
+            pass
         # Columns: Name, Value, Std, Vary (small), Min, Max, Corr
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(['Name', 'Value', 'Std', 'Vary', 'Min', 'Max', 'Corr'])
@@ -596,17 +605,31 @@ class MainWindow(QMainWindow):
             else:
                 mx = self.table.item(r, 5).text() if self.table.item(r, 5) is not None else ''
             entry = {}
+            # Normalize user-entered numeric strings (accept comma as decimal)
+            def _sanitize_num_str(s):
+                try:
+                    if s is None:
+                        return ''
+                    if isinstance(s, str):
+                        return s.strip().replace(',', '.')
+                    return s
+                except Exception:
+                    return s
+
             try:
-                entry['value'] = float(val)
+                sval = _sanitize_num_str(val)
+                entry['value'] = float(sval)
             except Exception:
                 entry['value'] = float('nan')
             entry['vary'] = bool(cb.isChecked()) if cb is not None else True
             try:
-                entry['min'] = float(mn)
+                smn = _sanitize_num_str(mn)
+                entry['min'] = float(smn)
             except Exception:
                 entry['min'] = None
             try:
-                entry['max'] = float(mx)
+                smx = _sanitize_num_str(mx)
+                entry['max'] = float(smx)
             except Exception:
                 entry['max'] = None
             cfg[name] = entry
@@ -1204,23 +1227,51 @@ class MainWindow(QMainWindow):
         if plotly_head is None:
             plotly_head = '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>'
 
-        html = f"""<!doctype html>
+                html = f"""<!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8">
-    <title>PeakFit Preview</title>
-    <link rel="stylesheet" href="{katex_css}">
-    {plotly_head}
-    <script defer src="{katex_js}"></script>
-    <script defer src="{katex_autorender}"></script>
-    <style> body {{ font-family: Arial, sans-serif; margin:10px; }} table {{ width:100%; border-collapse:collapse; }} td, th {{ border:1px solid #ddd; padding:6px; }}</style>
-  </head>
-    <body>
-        <div class="main">{main_div}</div>
-        <div class="resid">{resid_div}</div>
-        <div class="math">{math_block}</div>
-    </body>
+    <head>
+        <meta charset="utf-8">
+        <title>PeakFit Preview</title>
+        <link rel="stylesheet" href="{katex_css}">
+        {plotly_head}
+        <script defer src="{katex_js}"></script>
+        <script defer src="{katex_autorender}"></script>
+        <style> body {{ font-family: Arial, sans-serif; margin:10px; }} table {{ width:100%; border-collapse:collapse; }} td, th {{ border:1px solid #ddd; padding:6px; }}</style>
+    </head>
+        <body>
+                <div class="main">{main_div}</div>
+                <div class="resid">{resid_div}</div>
+                <div class="math">{math_block}</div>
+        </body>
 </html>"""
+
+                # small JS to sync the main plot's x-range to the residuals plot
+                sync_js = '''<script>
+(function(){
+    function setupSync(){
+        var plots = document.getElementsByClassName('plotly-graph-div');
+        if(!plots || plots.length < 2) return;
+        var main = plots[0], resid = plots[1];
+        function handler(eventdata){
+            try{
+                if(eventdata['xaxis.range[0]'] !== undefined && eventdata['xaxis.range[1]'] !== undefined){
+                    Plotly.relayout(resid, {'xaxis.range':[eventdata['xaxis.range[0]'], eventdata['xaxis.range[1]']]});
+                } else if(eventdata['xaxis.range']){
+                    Plotly.relayout(resid, {'xaxis.range':eventdata['xaxis.range']});
+                } else if(eventdata['xaxis.autorange'] === true){
+                    Plotly.relayout(resid, {'xaxis.autorange': true});
+                }
+            }catch(e){}
+        }
+        try{ main.on('plotly_relayout', handler); }catch(e){}
+    }
+    if(document.readyState==='complete'){ setTimeout(setupSync, 100); } else { window.addEventListener('load', function(){ setTimeout(setupSync, 100); }); }
+})();
+</script>'''
+                try:
+                        html = html.replace('</body>', sync_js + '\n</body>')
+                except Exception:
+                        pass
 
         # remember last model for saving
         self.last_y_model = None if y_model is None else np.asarray(y_model)
@@ -1236,21 +1287,43 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, 'Save fitted data', 'fitted.txt', 'Text Files (*.txt);;All Files (*)')
         if not path:
             return
+        # Ask whether to save the full spectrum or only the selected range
+        save_full = False
         try:
-            # determine selected range mask (only export points inside selected fit range)
+            dlg = QtWidgets.QMessageBox(self)
+            dlg.setWindowTitle('Save Range')
+            dlg.setText('Save full spectrum or only the selected range?')
+            full_btn = dlg.addButton('Full spectrum', QtWidgets.QMessageBox.AcceptRole)
+            sel_btn = dlg.addButton('Selected range', QtWidgets.QMessageBox.AcceptRole)
+            cancel_btn = dlg.addButton(QtWidgets.QMessageBox.Cancel)
+            dlg.exec()
+            clicked = dlg.clickedButton()
+            if clicked == cancel_btn:
+                return
+            elif clicked == full_btn:
+                save_full = True
+            else:
+                save_full = False
+        except Exception:
+            save_full = False
+        try:
+            # determine which points to export depending on the user's choice
             try:
                 x_arr = np.asarray(self.iw, dtype=float)
-                if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
-                    x0 = float(self.fit_xmin_spin.value())
-                    x1 = float(self.fit_xmax_spin.value())
-                    if x0 > x1:
-                        x0, x1 = x1, x0
-                    mask = (x_arr >= x0) & (x_arr <= x1)
-                    if not np.any(mask):
-                        QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to save')
-                        return
-                else:
+                if save_full:
                     mask = np.ones_like(x_arr, dtype=bool)
+                else:
+                    if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                        x0 = float(self.fit_xmin_spin.value())
+                        x1 = float(self.fit_xmax_spin.value())
+                        if x0 > x1:
+                            x0, x1 = x1, x0
+                        mask = (x_arr >= x0) & (x_arr <= x1)
+                        if not np.any(mask):
+                            QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to save')
+                            return
+                    else:
+                        mask = np.ones_like(x_arr, dtype=bool)
             except Exception:
                 x_arr = np.asarray(self.iw, dtype=float)
                 mask = np.ones_like(x_arr, dtype=bool)
@@ -1373,6 +1446,26 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        # Ask whether to export the full spectrum or only the selected range
+        export_full = False
+        try:
+            dlg = QtWidgets.QMessageBox(self)
+            dlg.setWindowTitle('Export Range')
+            dlg.setText('Export full spectrum or only the selected range?')
+            full_btn = dlg.addButton('Full spectrum', QtWidgets.QMessageBox.AcceptRole)
+            sel_btn = dlg.addButton('Selected range', QtWidgets.QMessageBox.AcceptRole)
+            cancel_btn = dlg.addButton(QtWidgets.QMessageBox.Cancel)
+            dlg.exec()
+            clicked = dlg.clickedButton()
+            if clicked == cancel_btn:
+                return
+            elif clicked == full_btn:
+                export_full = True
+            else:
+                export_full = False
+        except Exception:
+            export_full = False
+
         # prepare parameters and errs from last fit if present
         params = None
         errs = None
@@ -1392,17 +1485,20 @@ class MainWindow(QMainWindow):
             try:
                 x_arr = np.asarray(self.iw, dtype=float)
                 y_arr = np.asarray(self.y, dtype=float)
-                if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
-                    x0 = float(self.fit_xmin_spin.value())
-                    x1 = float(self.fit_xmax_spin.value())
-                    if x0 > x1:
-                        x0, x1 = x1, x0
-                    mask = (x_arr >= x0) & (x_arr <= x1)
-                    if not np.any(mask):
-                        QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to export')
-                        return
-                else:
+                if export_full:
                     mask = np.ones_like(x_arr, dtype=bool)
+                else:
+                    if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
+                        x0 = float(self.fit_xmin_spin.value())
+                        x1 = float(self.fit_xmax_spin.value())
+                        if x0 > x1:
+                            x0, x1 = x1, x0
+                        mask = (x_arr >= x0) & (x_arr <= x1)
+                        if not np.any(mask):
+                            QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to export')
+                            return
+                    else:
+                        mask = np.ones_like(x_arr, dtype=bool)
             except Exception:
                 x_arr = np.asarray(self.iw)
                 y_arr = np.asarray(self.y)
@@ -1511,6 +1607,13 @@ class MainWindow(QMainWindow):
                     else:
                         self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
             try:
+                # If the GUI has the Gaussian-enable checkbox checked, ensure
+                # the Gaussian parameters are present in the loaded config
+                if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
+                    try:
+                        self._ensure_gaussian_params()
+                    except Exception:
+                        pass
                 self._populate_param_table()
             except Exception:
                 pass
@@ -1566,7 +1669,62 @@ class MainWindow(QMainWindow):
                 pass
         except Exception:
             pass
+        # If the extra Gaussian checkbox is on, ensure its params exist
+        try:
+            if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
+                try:
+                    self._ensure_gaussian_params()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return self.param_config
+
+    def _ensure_gaussian_params(self):
+        """Add default Gaussian parameters to `self.param_config` if missing.
+
+        Parameters added: `N_g` (amplitude), `x0` (center), `gg` (FWHM).
+        """
+        try:
+            if not isinstance(self.param_config, dict):
+                self.param_config = {}
+            # sensible defaults: amplitude zero, center at data midpoint if available
+            try:
+                x0_default = float(np.mean(np.asarray(self.iw))) if self.iw is not None else 0.0
+            except Exception:
+                x0_default = 0.0
+            defaults = {
+                'N_g': {'value': 0.0, 'vary': True, 'min': 0.0, 'max': None},
+                'x0': {'value': x0_default, 'vary': True, 'min': None, 'max': None},
+                'gg': {'value': 1.0, 'vary': True, 'min': 1e-6, 'max': None},
+            }
+            for k, v in defaults.items():
+                if k not in self.param_config:
+                    self.param_config[k] = v
+        except Exception:
+            pass
+
+    def _toggle_gaussian(self, checked: bool):
+        try:
+            if checked:
+                try:
+                    self._ensure_gaussian_params()
+                except Exception:
+                    pass
+            else:
+                # remove gaussian params if present
+                for k in ('N_g', 'x0', 'gg'):
+                    if k in self.param_config:
+                        try:
+                            del self.param_config[k]
+                        except Exception:
+                            pass
+            try:
+                self._populate_param_table()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _apply_fit_range(self):
         try:
