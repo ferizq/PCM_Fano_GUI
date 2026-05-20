@@ -50,31 +50,63 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     # Main figure: data + fit (fixed height). If `params` contains an
     # additive Gaussian component compute and plot components separately
     fig_main = go.Figure()
-    fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6)))
+    # Highlight points that hit the dataset min or max with a faint red square
+    try:
+      y_arr = np.asarray(y, dtype=float)
+      y_min = float(np.min(y_arr))
+      y_max = float(np.max(y_arr))
+      colors = [ 'rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_arr ]
+      symbols = [ 'square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_arr ]
+      fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6, color=colors, symbol=symbols)))
+    except Exception:
+      fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6)))
 
     # Attempt to compute model components (base integral and gaussian)
     base = None
-    gauss = None
+    gauss_total = None
     y_model_calc = None
+    gauss_components = None
     if params is not None:
       try:
-        base, gauss = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel)
-        y_model_calc = np.asarray(base) + np.asarray(gauss)
+        base, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel)
+        y_model_calc = np.asarray(base) + np.asarray(gauss_total) + np.asarray(lorentz_total)
       except Exception:
         base = None
-        gauss = None
+        gauss_total = None
         y_model_calc = None
+        gauss_components = None
+        lorentz_components = None
 
     if y_model_calc is not None:
       # If we have separate components, show them as distinct traces
       try:
-        has_gauss = np.any(np.asarray(gauss) != 0.0)
+        has_components = False
+        if gauss_components is not None and any(np.any(np.asarray(c) != 0.0) for c in gauss_components):
+            has_components = True
+        if lorentz_components is not None and any(np.any(np.asarray(c) != 0.0) for c in lorentz_components):
+            has_components = True
       except Exception:
-        has_gauss = False
+        has_components = False
       # Integral / PCM component
       fig_main.add_trace(go.Scatter(x=iw, y=base, mode='lines', name='integral component', line=dict(width=2, dash='dash')))
-      # Gaussian component (may be zero)
-      fig_main.add_trace(go.Scatter(x=iw, y=gauss, mode='lines', name='gaussian component', line=dict(width=2, dash='dot')))
+      # Plot each gaussian component individually (if any non-zero)
+      if gauss_components is not None:
+        for j, comp in enumerate(gauss_components):
+          try:
+            arr = np.asarray(comp)
+            if np.any(np.abs(arr) > 1e-12):
+                fig_main.add_trace(go.Scatter(x=iw, y=arr, mode='lines', name=f'gaussian {j+1}', line=dict(width=1, dash='dot')))
+          except Exception:
+            pass
+      # Plot each lorentzian component individually (if any non-zero)
+      if lorentz_components is not None:
+        for j, comp in enumerate(lorentz_components):
+          try:
+            arr = np.asarray(comp)
+            if np.any(np.abs(arr) > 1e-12):
+                fig_main.add_trace(go.Scatter(x=iw, y=arr, mode='lines', name=f'lorentzian {j+1}', line=dict(width=1, dash='dot')))
+          except Exception:
+            pass
       # Sum (fit)
       fig_main.add_trace(go.Scatter(x=iw, y=y_model_calc, mode='lines', name='fit', line=dict(width=3)))
     else:

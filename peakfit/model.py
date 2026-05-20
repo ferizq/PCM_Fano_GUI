@@ -17,6 +17,7 @@ and 'quad' (uses scipy.integrate.quad for higher accuracy).
 """
 from typing import Any, Dict, Optional
 import numpy as np
+import re
 
 def _get(params: Dict[str, Any], name: str, default: Any):
     """Retrieve a parameter value, accepting legacy 'i'-prefixed names.
@@ -127,8 +128,9 @@ def model(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int =
 
     Returns y = N * integral_{ik=ik_min..ik_max} kernel_integrand(ik, iw, params) d(ik) + y0
     """
-    base, gauss = model_components(iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, quad_opts=quad_opts, kernel=kernel)
-    return base + gauss
+    # model_components now returns (base, gauss_total, gauss_components, lorentz_total, lorentz_components)
+    base, gauss_total, _, lorentz_total, _ = model_components(iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, quad_opts=quad_opts, kernel=kernel)
+    return base + gauss_total + lorentz_total
 
 
 def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_size: int = 4000,
@@ -136,9 +138,13 @@ def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_
                      kernel: str = 'PCM_Fano_Bessel'):
     """Compute the model components separately.
 
-    Returns a tuple `(base, gauss)` where `base` is the integral-derived
-    contribution (including `y0` and `N` scaling) and `gauss` is the optional
-    additive Gaussian peak (may be all zeros when not provided).
+    Returns a tuple ``(base, gauss_total, gauss_components, lorentz_total, lorentz_components)`` where
+    ``base`` is the integral-derived contribution (including ``y0`` and ``N`` scaling),
+    ``gauss_total`` is the sum of any additive Gaussian components and
+    ``gauss_components`` is a list with each individual Gaussian array (may be
+    empty when no Gaussians are provided). Similarly, ``lorentz_total`` is the
+    sum of any additive Lorentzian components and ``lorentz_components`` is a
+    list with each individual Lorentzian array.
     """
     iw_arr = np.atleast_1d(iw).astype(float)
 
@@ -193,15 +199,97 @@ def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_
             denom = 1e-24
         base = (N / denom) * integral + y0
 
-    # Optional additive Gaussian peak
+    # Support multiple additive Gaussian and Lorentzian peaks. Detect parameter
+    # names like Ng, Ng1, Ng2, x0g, x0g1, gg, gg1 for Gaussians and
+    # Nl, Nl1, x0l, x0l1, gl, gl1 for Lorentzians.
+    gauss_components = []
+    gauss_total = np.zeros_like(iw_arr, dtype=float)
+    lorentz_components = []
+    lorentz_total = np.zeros_like(iw_arr, dtype=float)
     try:
-        Ng = float(_get(params, 'N_g', 0.0))
-        x0g = float(_get(params, 'x0', 0.0))
-        gg = float(_get(params, 'gg', 0.0))
-        if gg == 0.0:
-            gg = 1e-24
-        gauss = Ng * np.exp(-4.0 * np.log(2.0) * ((iw_arr - x0g) ** 2) / (gg * gg))
-    except Exception:
-        gauss = np.zeros_like(iw_arr, dtype=float)
+        # Build a normalized key map for robust detection (strip leading 'i' and underscores)
+        norm_map = {}
+        if isinstance(params, dict):
+            for k in params.keys():
+                ks = str(k).lower()
+                if ks.startswith('i') and len(ks) > 1:
+                    ks = ks[1:]
+                kn = ks.replace('_', '')
+                if kn not in norm_map:
+                    norm_map[kn] = k
 
-    return base, gauss
+        # Gather numeric suffix indices from both gaussian and lorentzian keys
+        idxs = set()
+        for kn in norm_map.keys():
+            for pattern in (r'^ng(\d+)$', r'^x0(\d+)$', r'^x0g(\d+)$', r'^gg(\d+)$', r'^nl(\d+)$', r'^x0l(\d+)$', r'^gl(\d+)$'):
+                m = re.match(pattern, kn)
+                if m:
+                    idxs.add(int(m.group(1)))
+
+        # If no numbered components found, allow legacy unsuffixed names (single components)
+        if not idxs and any(k in norm_map for k in ('ng', 'x0', 'x0g', 'gg', 'nl', 'x0l', 'gl')):
+            idxs.add(1)
+
+        # For each detected index, assemble gaussian and lorentzian components as available
+        for idx in sorted(idxs):
+            def _get_raw_value(candidates, fallback):
+                raw = None
+                for cand in candidates:
+                    if cand in norm_map:
+                        raw = params[norm_map[cand]]
+                        break
+                if raw is None:
+                    try:
+                        return float(_get(params, fallback + (str(idx) if idx > 1 else ''), 0.0))
+                    except Exception:
+                        return 0.0
+                try:
+                    if isinstance(raw, dict) and 'value' in raw:
+                        return float(raw.get('value', 0.0))
+                    return float(raw)
+                except Exception:
+                    try:
+                        return float(_get(params, fallback + (str(idx) if idx > 1 else ''), 0.0))
+                    except Exception:
+                        return 0.0
+
+            # Gaussian params
+            Ng = _get_raw_value([f'ng{idx}'], 'ng')
+            x0g = _get_raw_value([f'x0g{idx}', f'x0{idx}'], 'x0')
+            gg = _get_raw_value([f'gg{idx}'], 'gg')
+            try:
+                if gg == 0.0:
+                    gg = 1e-24
+                comp_g = Ng * np.exp(-4.0 * np.log(2.0) * ((iw_arr - x0g) ** 2) / (gg * gg))
+            except Exception:
+                comp_g = np.zeros_like(iw_arr, dtype=float)
+            gauss_components.append(comp_g)
+            gauss_total = gauss_total + comp_g
+
+            # Lorentzian params
+            Nl = _get_raw_value([f'nl{idx}'], 'nl')
+            x0l = _get_raw_value([f'x0l{idx}'], 'x0l')
+            gl = _get_raw_value([f'gl{idx}'], 'gl')
+            try:
+                if gl == 0.0:
+                    gl = 1e-24
+                comp_l = Nl / ((2.0 * (iw_arr - x0l) / gl) ** 2 + 1.0)
+            except Exception:
+                comp_l = np.zeros_like(iw_arr, dtype=float)
+            lorentz_components.append(comp_l)
+            lorentz_total = lorentz_total + comp_l
+    except Exception:
+        # on failure fall back to legacy single-component behavior (gaussian)
+        try:
+            Ng = float(_get(params, 'N_g', 0.0))
+            x0g = float(_get(params, 'x0', 0.0))
+            gg = float(_get(params, 'gg', 0.0))
+            if gg == 0.0:
+                gg = 1e-24
+            gauss_total = Ng * np.exp(-4.0 * np.log(2.0) * ((iw_arr - x0g) ** 2) / (gg * gg))
+            gauss_components = [gauss_total]
+        except Exception:
+            gauss_total = np.zeros_like(iw_arr, dtype=float)
+            gauss_components = []
+
+    return base, gauss_total, gauss_components, lorentz_total, lorentz_components

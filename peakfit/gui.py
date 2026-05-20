@@ -346,13 +346,40 @@ class MainWindow(QMainWindow):
         left_l.addWidget(self.fit_status)
 
         left_l.addWidget(QLabel('Parameters'))
-        # Checkbox to enable an additional Gaussian peak (Ng, x0, gg)
         try:
-            self.gauss_cb = QCheckBox('Enable additional Gaussian peak')
+            # Combined row: Gaussian checkbox + count and Lorentzian checkbox + count in one line
+            combo_row = QWidget()
+            combo_layout = QHBoxLayout(combo_row)
+            combo_layout.setContentsMargins(0, 0, 0, 0)
+            # Gaussian controls
+            self.gauss_cb = QCheckBox('Gaussians')
             self.gauss_cb.setChecked(False)
-            self.gauss_cb.setToolTip('When checked, add an extra Gaussian peak (N_g, x0, gg) to the model')
+            self.gauss_cb.setToolTip('Enable Gaussian components')
             self.gauss_cb.toggled.connect(self._toggle_gaussian)
-            left_l.addWidget(self.gauss_cb)
+            combo_layout.addWidget(self.gauss_cb)
+            combo_layout.addWidget(QLabel('Count:'))
+            self.gauss_count_spin = QSpinBox()
+            self.gauss_count_spin.setRange(1, 10)
+            self.gauss_count_spin.setValue(1)
+            self.gauss_count_spin.setEnabled(False)
+            self.gauss_count_spin.valueChanged.connect(lambda v: (self._ensure_gaussian_params(), self._populate_param_table()))
+            combo_layout.addWidget(self.gauss_count_spin)
+            # Spacer
+            combo_layout.addStretch(1)
+            # Lorentzian controls
+            self.lorentz_cb = QCheckBox('Lorentzians')
+            self.lorentz_cb.setChecked(False)
+            self.lorentz_cb.setToolTip('Enable Lorentzian components')
+            self.lorentz_cb.toggled.connect(self._toggle_lorentz)
+            combo_layout.addWidget(self.lorentz_cb)
+            combo_layout.addWidget(QLabel('Count:'))
+            self.lorentz_count_spin = QSpinBox()
+            self.lorentz_count_spin.setRange(1, 10)
+            self.lorentz_count_spin.setValue(1)
+            self.lorentz_count_spin.setEnabled(False)
+            self.lorentz_count_spin.valueChanged.connect(lambda v: (self._ensure_lorentz_params(), self._populate_param_table()))
+            combo_layout.addWidget(self.lorentz_count_spin)
+            left_l.addWidget(combo_row)
         except Exception:
             pass
         # Columns: Name, Value, Std, Vary (small), Min, Max, Corr
@@ -1009,6 +1036,57 @@ class MainWindow(QMainWindow):
                 except Exception:
                     self.table.item(r, 2).setText(str(errs[name]))
 
+        # Highlight min/max cells when fitted values hit parameter bounds
+        try:
+            for r in range(self.table.rowCount()):
+                pname = self.table.item(r, 0).text()
+                try:
+                    pval = float(fitted.get(pname, self.param_config.get(pname, {}).get('value', float('nan'))))
+                except Exception:
+                    # skip non-numeric values
+                    continue
+                pmin = self.param_config.get(pname, {}).get('min', None)
+                pmax = self.param_config.get(pname, {}).get('max', None)
+                try:
+                    tol = max(1e-8, 1e-6 * max(abs(pval), 1.0))
+                except Exception:
+                    tol = 1e-8
+                # cell widgets for Min/Max (QLineEdit); may be None
+                min_w = self.table.cellWidget(r, 4)
+                max_w = self.table.cellWidget(r, 5)
+                # clear previous highlighting
+                try:
+                    if min_w is not None:
+                        min_w.setStyleSheet('')
+                except Exception:
+                    pass
+                try:
+                    if max_w is not None:
+                        max_w.setStyleSheet('')
+                except Exception:
+                    pass
+                # Only highlight min/max boxes when the parameter is set to vary
+                try:
+                    vary_cb = self.table.cellWidget(r, 3)
+                    vary_enabled = bool(vary_cb.isChecked()) if vary_cb is not None else False
+                except Exception:
+                    vary_enabled = False
+                # apply highlight when value is at or very near bound and vary is enabled
+                try:
+                    if vary_enabled and pmin is not None and np.isfinite(float(pmin)) and pval <= float(pmin) + tol:
+                        if min_w is not None:
+                            min_w.setStyleSheet('background-color: rgba(255,0,0,0.15);')
+                except Exception:
+                    pass
+                try:
+                    if vary_enabled and pmax is not None and np.isfinite(float(pmax)) and pval >= float(pmax) - tol:
+                        if max_w is not None:
+                            max_w.setStyleSheet('background-color: rgba(255,0,0,0.15);')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Update plots: compute the model on the full x-grid so the overlay
         # shows the fitted function across all loaded data, even if the
         # backend was only given a sliced subset.
@@ -1080,7 +1158,16 @@ class MainWindow(QMainWindow):
         main_fig = go.Figure()
         x_data = list(map(float, np.asarray(self.iw)))
         y_data = list(map(float, np.asarray(self.y)))
-        main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6)))
+        # Highlight points that hit dataset min or max with a faint red square
+        try:
+            y_arr = np.asarray(self.y, dtype=float)
+            y_min = float(np.min(y_arr))
+            y_max = float(np.max(y_arr))
+            colors = ['rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_arr]
+            symbols = ['square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_arr]
+            main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6, color=colors, symbol=symbols)))
+        except Exception:
+            main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6)))
 
         # If the Gaussian checkbox is enabled, compute and plot separate
         # components (integral/base and gaussian) and their sum. Otherwise
@@ -1090,19 +1177,43 @@ class MainWindow(QMainWindow):
             params_for_model = {name: info.get('value', 0.0) for name, info in self.param_config.items()} if isinstance(self.param_config, dict) else None
         except Exception:
             params_for_model = None
-        if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and params_for_model is not None:
+        if params_for_model is not None and ((getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked()) or (getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked())):
             try:
                 grid_sz = int(self.preview_spin.value()) if hasattr(self, 'preview_spin') else 100
                 integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
                 ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
                 ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                base_comp, gauss_comp = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
-                base_list = list(map(float, np.asarray(base_comp)))
-                gauss_list = list(map(float, np.asarray(gauss_comp)))
-                sum_list = list(map(float, np.asarray(base_comp) + np.asarray(gauss_comp)))
-                main_fig.add_trace(go.Scatter(x=x_data, y=base_list, mode='lines', name='integral component', line=dict(width=2, dash='dash')))
-                main_fig.add_trace(go.Scatter(x=x_data, y=gauss_list, mode='lines', name='gaussian component', line=dict(width=2, dash='dot')))
-                main_fig.add_trace(go.Scatter(x=x_data, y=sum_list, mode='lines', name='fit', line=dict(width=3)))
+                base_comp, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
+                base_arr = np.asarray(base_comp, dtype=float)
+                gauss_total_arr = np.asarray(gauss_total, dtype=float)
+                lorentz_total_arr = np.asarray(lorentz_total, dtype=float)
+                # Build summed model respecting which component types are enabled
+                sum_arr = base_arr.copy()
+                if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
+                    sum_arr = sum_arr + gauss_total_arr
+                if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked():
+                    sum_arr = sum_arr + lorentz_total_arr
+                # Integral / PCM component
+                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, base_arr)), mode='lines', name='integral component', line=dict(width=2, dash='dash')))
+                # Plot gaussian components only when enabled and non-zero
+                if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and gauss_components is not None:
+                    for j, comp in enumerate(gauss_components):
+                        try:
+                            arr = np.asarray(comp, dtype=float)
+                            if np.any(np.abs(arr) > 1e-12):
+                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr)), mode='lines', name=f'gaussian {j+1}', line=dict(width=2, dash='dot')))
+                        except Exception:
+                            pass
+                # Plot lorentzian components only when enabled and non-zero
+                if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked() and lorentz_components is not None:
+                    for j, comp in enumerate(lorentz_components):
+                        try:
+                            arr = np.asarray(comp, dtype=float)
+                            if np.any(np.abs(arr) > 1e-12):
+                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr)), mode='lines', name=f'lorentzian {j+1}', line=dict(width=2, dash='dot')))
+                        except Exception:
+                            pass
+                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, sum_arr)), mode='lines', name='fit', line=dict(width=3)))
                 plotted_model = True
             except Exception:
                 plotted_model = False
@@ -1283,8 +1394,8 @@ class MainWindow(QMainWindow):
         main_div = main_div.replace('height:100%;', f'height:{main_h}px;')
         resid_div = resid_div.replace('height:100%;', f'height:{resid_h}px;')
 
-        # Math block (reuse short description)
-        math_block = '<div><strong>Model:</strong> see documentation</div>'
+        # Math block (empty - no message shown in preview)
+        math_block = ''
 
         # Compose final HTML: inline local plotly if available (avoids race 'Plotly is not defined')
         plotly_head = None
@@ -1413,9 +1524,45 @@ class MainWindow(QMainWindow):
             x_sel = x_arr[mask]
             y_sel = np.asarray(self.y, dtype=float)[mask]
 
-            # determine fitted values for the selected points
+            # determine fitted values and per-component contributions for the selected points
+            base_full = None
+            gauss_total_full = None
+            gauss_components_full = None
+            lorentz_total_full = None
+            lorentz_components_full = None
             y_fit = None
-            if getattr(self, 'last_y_model', None) is not None:
+
+            # prefer using last fit output parameters when available, else use current table values
+            params_plot = None
+            if getattr(self, 'last_fit_out', None) is not None:
+                out = self.last_fit_out
+                params_plot = out.get('fitted') or out.get('params') or None
+            if params_plot is None:
+                try:
+                    params_plot = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
+                except Exception:
+                    params_plot = None
+
+            integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+            grid_size = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+            ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+            ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+            kernel_name = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+
+            if params_plot is not None:
+                try:
+                    base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
+                    if np.asarray(base_full).size == x_arr.size and np.asarray(gauss_total_full).size == x_arr.size and np.asarray(lorentz_total_full).size == x_arr.size:
+                        y_fit = (np.asarray(base_full) + np.asarray(gauss_total_full) + np.asarray(lorentz_total_full))[mask]
+                except Exception:
+                    base_full = None
+                    gauss_total_full = None
+                    gauss_components_full = None
+                    lorentz_total_full = None
+                    lorentz_components_full = None
+
+            # fallback: use last_y_model array if recompute failed
+            if y_fit is None and getattr(self, 'last_y_model', None) is not None:
                 try:
                     y_model_arr = np.asarray(self.last_y_model, dtype=float)
                     if y_model_arr.size == x_arr.size:
@@ -1423,16 +1570,21 @@ class MainWindow(QMainWindow):
                 except Exception:
                     y_fit = None
 
+            # final fallback: try compute_model from current param_config values
             if y_fit is None:
-                # try to recompute model from current param_config
                 try:
                     params = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
-                    integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
-                    grid_size = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
-                    ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
-                    ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                    y_full = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel')
+                    y_full = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
                     y_fit = np.asarray(y_full, dtype=float)[mask]
+                    # try to compute components as well
+                    try:
+                        base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
+                    except Exception:
+                        base_full = None
+                        gauss_total_full = None
+                        gauss_components_full = None
+                        lorentz_total_full = None
+                        lorentz_components_full = None
                 except Exception:
                     y_fit = np.full_like(x_sel, np.nan, dtype=float)
 
@@ -1479,18 +1631,138 @@ class MainWindow(QMainWindow):
                     else:
                         f.write(f"# {k} = {val_str}\n")
 
-                # column header
-                f.write("# x\texperimental\tfitted\tresidual\n")
-                # data rows (include residual = experimental - fitted)
+                # column header: include integral and individual gaussian and lorentzian component columns
+                try:
+                    # Respect GUI-enabled counts when available (user requested number of components)
+                    if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and hasattr(self, 'gauss_count_spin'):
+                        n_gauss = int(self.gauss_count_spin.value())
+                    else:
+                        # fallback: count non-empty gaussian components
+                        if gauss_components_full is not None and len(gauss_components_full) > 0:
+                            n_gauss = len(gauss_components_full)
+                        elif gauss_total_full is not None:
+                            n_gauss = 1
+                        else:
+                            n_gauss = 0
+                except Exception:
+                    n_gauss = 0
+                try:
+                    if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked() and hasattr(self, 'lorentz_count_spin'):
+                        n_lorentz = int(self.lorentz_count_spin.value())
+                    else:
+                        if lorentz_components_full is not None and len(lorentz_components_full) > 0:
+                            # only include lorentzian columns if non-zero contributions exist
+                            # count components heuristically
+                            try:
+                                n_lorentz = sum(1 for c in lorentz_components_full if np.any(np.abs(np.asarray(c)) > 1e-12))
+                                if n_lorentz == 0 and lorentz_total_full is not None and np.any(np.abs(np.asarray(lorentz_total_full)) > 1e-12):
+                                    n_lorentz = 1
+                            except Exception:
+                                n_lorentz = len(lorentz_components_full)
+                        elif lorentz_total_full is not None and np.any(np.abs(np.asarray(lorentz_total_full)) > 1e-12):
+                            n_lorentz = 1
+                        else:
+                            n_lorentz = 0
+                except Exception:
+                    n_lorentz = 0
+                gauss_names = [f"gaussian_{i+1}" for i in range(n_gauss)]
+                lorentz_names = [f"lorentzian_{i+1}" for i in range(n_lorentz)]
+                cols = ["x", "experimental", "fitted", "residual", "integral"] + gauss_names + lorentz_names
+                f.write("# " + "\t".join(cols) + "\n")
+
+                # prepare per-selected arrays for integral and gaussians (fill NaN when not available)
+                try:
+                    if base_full is not None and np.asarray(base_full).size == x_arr.size:
+                        base_sel = np.asarray(base_full)[mask]
+                    else:
+                        base_sel = np.full_like(x_sel, float('nan'), dtype=float)
+                except Exception:
+                    base_sel = np.full_like(x_sel, float('nan'), dtype=float)
+
+                gauss_sel_lists = []
+                lorentz_sel_lists = []
+                # Build gauss columns according to requested or detected count
+                try:
+                    if n_gauss > 0:
+                        if gauss_components_full is not None and len(gauss_components_full) >= n_gauss:
+                            for i in range(n_gauss):
+                                gauss_sel_lists.append(np.asarray(gauss_components_full[i])[mask])
+                        else:
+                            # try to include available components then pad with NaN columns
+                            if gauss_components_full is not None and len(gauss_components_full) > 0:
+                                for comp in gauss_components_full:
+                                    gauss_sel_lists.append(np.asarray(comp)[mask])
+                                while len(gauss_sel_lists) < n_gauss:
+                                    gauss_sel_lists.append(np.full_like(x_sel, float('nan'), dtype=float))
+                            elif gauss_total_full is not None and np.asarray(gauss_total_full).size == x_arr.size:
+                                gauss_sel_lists.append(np.asarray(gauss_total_full)[mask])
+                                while len(gauss_sel_lists) < n_gauss:
+                                    gauss_sel_lists.append(np.full_like(x_sel, float('nan'), dtype=float))
+                            else:
+                                gauss_sel_lists = [np.full_like(x_sel, float('nan'), dtype=float) for _ in range(n_gauss)]
+                    else:
+                        gauss_sel_lists = []
+                except Exception:
+                    gauss_sel_lists = [np.full_like(x_sel, float('nan'), dtype=float) for _ in range(n_gauss)]
+                # Build lorentz columns according to requested or detected count
+                try:
+                    if n_lorentz > 0:
+                        if lorentz_components_full is not None and len(lorentz_components_full) >= n_lorentz:
+                            for i in range(n_lorentz):
+                                lorentz_sel_lists.append(np.asarray(lorentz_components_full[i])[mask])
+                        else:
+                            if lorentz_components_full is not None and len(lorentz_components_full) > 0:
+                                for comp in lorentz_components_full:
+                                    lorentz_sel_lists.append(np.asarray(comp)[mask])
+                                while len(lorentz_sel_lists) < n_lorentz:
+                                    lorentz_sel_lists.append(np.full_like(x_sel, float('nan'), dtype=float))
+                            elif lorentz_total_full is not None and np.asarray(lorentz_total_full).size == x_arr.size:
+                                lorentz_sel_lists.append(np.asarray(lorentz_total_full)[mask])
+                                while len(lorentz_sel_lists) < n_lorentz:
+                                    lorentz_sel_lists.append(np.full_like(x_sel, float('nan'), dtype=float))
+                            else:
+                                lorentz_sel_lists = [np.full_like(x_sel, float('nan'), dtype=float) for _ in range(n_lorentz)]
+                    else:
+                        lorentz_sel_lists = []
+                except Exception:
+                    lorentz_sel_lists = [np.full_like(x_sel, float('nan'), dtype=float) for _ in range(n_lorentz)]
+
                 try:
                     resid_arr = (np.asarray(y_sel, dtype=float) - np.asarray(y_fit, dtype=float))
                 except Exception:
-                    resid_arr = [float('nan')] * len(x_sel)
-                for xi, yi, yf, yr in zip(x_sel, y_sel, y_fit, resid_arr):
+                    resid_arr = np.full_like(x_sel, float('nan'), dtype=float)
+
+                for idx in range(len(x_sel)):
+                    xi = x_sel[idx]
+                    yi = y_sel[idx]
                     try:
-                        f.write(f"{xi:.6g}\t{yi:.6g}\t{yf:.6g}\t{yr:.6g}\n")
+                        yf_val = float(y_fit[idx])
                     except Exception:
-                        f.write(f"{xi}\t{yi}\t{yf}\t{yr}\n")
+                        yf_val = float('nan')
+                    try:
+                        yr = float(resid_arr[idx])
+                    except Exception:
+                        yr = float('nan')
+                    try:
+                        base_val = float(base_sel[idx])
+                    except Exception:
+                        base_val = float('nan')
+                    row_vals = [xi, yi, yf_val, yr, base_val]
+                    for glist in gauss_sel_lists:
+                        try:
+                            row_vals.append(float(glist[idx]))
+                        except Exception:
+                            row_vals.append(float('nan'))
+                    for llist in lorentz_sel_lists:
+                        try:
+                            row_vals.append(float(llist[idx]))
+                        except Exception:
+                            row_vals.append(float('nan'))
+                    try:
+                        f.write("\t".join(f"{v:.6g}" for v in row_vals) + "\n")
+                    except Exception:
+                        # fallback to a simpler write if formatting fails
+                        f.write("\t".join(str(v) for v in row_vals) + "\n")
 
             QtWidgets.QMessageBox.information(self, 'Saved', f'Saved data to {path}')
         except Exception as e:
@@ -1689,11 +1961,16 @@ class MainWindow(QMainWindow):
                     else:
                         self.param_config = copy.deepcopy(BESSEL_DEFAULT_PARAMS)
             try:
-                # If the GUI has the Gaussian-enable checkbox checked, ensure
-                # the Gaussian parameters are present in the loaded config
+                # If the GUI has the Gaussian or Lorentz-enable checkbox checked, ensure
+                # the corresponding parameters are present in the loaded config
                 if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
                     try:
                         self._ensure_gaussian_params()
+                    except Exception:
+                        pass
+                if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked():
+                    try:
+                        self._ensure_lorentz_params()
                     except Exception:
                         pass
                 self._populate_param_table()
@@ -1751,11 +2028,16 @@ class MainWindow(QMainWindow):
                 pass
         except Exception:
             pass
-        # If the extra Gaussian checkbox is on, ensure its params exist
+        # If the extra Gaussian or Lorentzian checkbox is on, ensure its params exist
         try:
             if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
                 try:
                     self._ensure_gaussian_params()
+                except Exception:
+                    pass
+            if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked():
+                try:
+                    self._ensure_lorentz_params()
                 except Exception:
                     pass
         except Exception:
@@ -1766,20 +2048,185 @@ class MainWindow(QMainWindow):
         """Add default Gaussian parameters to `self.param_config` if missing.
 
         Parameters added: `N_g` (amplitude), `x0` (center), `gg` (FWHM).
+        Supports multiple components when `self.gauss_count_spin` is present
+        (adds suffixed parameters `N_g1`, `x0_1`, `gg_1`, ...).
         """
         try:
             if not isinstance(self.param_config, dict):
                 self.param_config = {}
-            # User-requested sensible defaults and bounds for the extra Gaussian
-            # Use explicit defaults so the executable behavior is machine-independent.
-            defaults = {
-                'N_g': {'value': 0.1, 'vary': True, 'min': 0.0, 'max': 1.0},
-                'x0': {'value': 480.0, 'vary': True, 'min': 400.0, 'max': 500.0},
-                'gg': {'value': 10.0, 'vary': True, 'min': 5.0, 'max': 100.0},
-            }
-            for k, v in defaults.items():
-                if k not in self.param_config:
-                    self.param_config[k] = v
+            # Number of gaussian components requested (default 1)
+            try:
+                count = int(self.gauss_count_spin.value()) if hasattr(self, 'gauss_count_spin') else 1
+            except Exception:
+                count = 1
+            # sensible defaults and bounds for each gaussian component
+            # Use canonical indexed names: Ng1, x0g1, gg1, Ng2, x0g2, gg2, ...
+            for i in range(1, count + 1):
+                key_area = f'Ng{i}'
+                key_x0 = f'x0g{i}'
+                key_gg = f'gg{i}'
+                defaults = {
+                    key_area: {'value': 0.1 if i == 1 else 0.0, 'vary': True, 'min': 0.0, 'max': 1.0},
+                    key_x0: {'value': 480.0, 'vary': True, 'min': 400.0, 'max': 500.0},
+                    key_gg: {'value': 10.0, 'vary': True, 'min': 5.0, 'max': 100.0},
+                }
+                for k, v in defaults.items():
+                    if k not in self.param_config:
+                        self.param_config[k] = v
+            # Migrate legacy unsuffixed gaussian keys to the new indexed names
+            try:
+                # legacy area: 'N_g' or 'Ng' -> 'Ng1'
+                if 'N_g' in self.param_config and 'Ng1' not in self.param_config:
+                    try:
+                        self.param_config['Ng1'] = self.param_config.pop('N_g')
+                    except Exception:
+                        pass
+                if 'Ng' in self.param_config and 'Ng1' not in self.param_config:
+                    try:
+                        self.param_config['Ng1'] = self.param_config.pop('Ng')
+                    except Exception:
+                        pass
+                # legacy center: 'x0' -> 'x0g1'
+                if 'x0' in self.param_config and 'x0g1' not in self.param_config:
+                    try:
+                        self.param_config['x0g1'] = self.param_config.pop('x0')
+                    except Exception:
+                        pass
+                # legacy width: 'gg' -> 'gg1'
+                if 'gg' in self.param_config and 'gg1' not in self.param_config:
+                    try:
+                        self.param_config['gg1'] = self.param_config.pop('gg')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Remove any higher-indexed gaussian params if the count was reduced
+            try:
+                # detect existing gaussian-like keys and remove those > count
+                keys = list(self.param_config.keys())
+                for k in keys:
+                    kn = str(k).lower().lstrip('i').replace('_', '')
+                    # match patterns like ng{n}, x0g{n}, gg{n}
+                    import re as _re
+                    m = _re.match(r'^(?:ng|x0g|gg)(\d+)$', kn)
+                    if m:
+                        idx = int(m.group(1))
+                        if idx > count:
+                            try:
+                                del self.param_config[k]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _ensure_lorentz_params(self):
+        """Add default Lorentzian parameters to `self.param_config` if missing.
+
+        Parameters added: `Nl` (amplitude), `x0l` (center), `gl` (width).
+        Supports multiple components when `self.lorentz_count_spin` is present
+        (adds suffixed parameters `Nl1`, `x0l1`, `gl1`, ...).
+        """
+        try:
+            if not isinstance(self.param_config, dict):
+                self.param_config = {}
+            # Number of lorentz components requested (default 1)
+            try:
+                count = int(self.lorentz_count_spin.value()) if hasattr(self, 'lorentz_count_spin') else 1
+            except Exception:
+                count = 1
+            # sensible defaults and bounds for each lorentz component
+            for i in range(1, count + 1):
+                key_area = f'Nl{i}'
+                key_x0 = f'x0l{i}'
+                key_gl = f'gl{i}'
+                defaults = {
+                    key_area: {'value': 0.1 if i == 1 else 0.0, 'vary': True, 'min': 0.0, 'max': 1.0},
+                    key_x0: {'value': 480.0, 'vary': True, 'min': 400.0, 'max': 500.0},
+                    key_gl: {'value': 10.0, 'vary': True, 'min': 1.0, 'max': 200.0},
+                }
+                for k, v in defaults.items():
+                    if k not in self.param_config:
+                        self.param_config[k] = v
+            # Migrate legacy unsuffixed lorentz keys to the new indexed names
+            try:
+                if 'N_l' in self.param_config and 'Nl1' not in self.param_config:
+                    try:
+                        self.param_config['Nl1'] = self.param_config.pop('N_l')
+                    except Exception:
+                        pass
+                if 'Nl' in self.param_config and 'Nl1' not in self.param_config:
+                    try:
+                        self.param_config['Nl1'] = self.param_config.pop('Nl')
+                    except Exception:
+                        pass
+                if 'x0l' in self.param_config and 'x0l1' not in self.param_config:
+                    try:
+                        self.param_config['x0l1'] = self.param_config.pop('x0l')
+                    except Exception:
+                        pass
+                if 'gl' in self.param_config and 'gl1' not in self.param_config:
+                    try:
+                        self.param_config['gl1'] = self.param_config.pop('gl')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Remove any higher-indexed lorentz params if the count was reduced
+            try:
+                keys = list(self.param_config.keys())
+                for k in keys:
+                    kn = str(k).lower().lstrip('i').replace('_', '')
+                    import re as _re
+                    m = _re.match(r'^(?:nl|x0l|gl)(\d+)$', kn)
+                    if m:
+                        idx = int(m.group(1))
+                        if idx > count:
+                            try:
+                                del self.param_config[k]
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _toggle_lorentz(self, checked: bool):
+        try:
+            if checked:
+                try:
+                    self._ensure_lorentz_params()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'lorentz_count_spin'):
+                        self.lorentz_count_spin.setEnabled(True)
+                except Exception:
+                    pass
+            else:
+                # remove lorentzian params if present
+                try:
+                    keys = list(self.param_config.keys())
+                    for k in keys:
+                        kn = str(k).lower()
+                        kns = kn.lstrip('i').replace('_', '')
+                        if kns.startswith('nl') or kns.startswith('x0l') or kns.startswith('gl'):
+                            try:
+                                del self.param_config[k]
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'lorentz_count_spin'):
+                        self.lorentz_count_spin.setEnabled(False)
+                except Exception:
+                    pass
+            try:
+                self._populate_param_table()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1790,14 +2237,31 @@ class MainWindow(QMainWindow):
                     self._ensure_gaussian_params()
                 except Exception:
                     pass
+                try:
+                    if hasattr(self, 'gauss_count_spin'):
+                        self.gauss_count_spin.setEnabled(True)
+                except Exception:
+                    pass
             else:
                 # remove gaussian params if present
-                for k in ('N_g', 'x0', 'gg'):
-                    if k in self.param_config:
-                        try:
-                            del self.param_config[k]
-                        except Exception:
-                            pass
+                # delete any gaussian-related keys (ng, ng1, x0, x01, gg, gg1, ...)
+                try:
+                    keys = list(self.param_config.keys())
+                    for k in keys:
+                        kn = str(k).lower()
+                        kns = kn.lstrip('i').replace('_', '')
+                        if kns.startswith('ng') or kns.startswith('x0g') or (kns.startswith('x0') and not kns.startswith('x0l')) or kns.startswith('gg'):
+                            try:
+                                del self.param_config[k]
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'gauss_count_spin'):
+                        self.gauss_count_spin.setEnabled(False)
+                except Exception:
+                    pass
             try:
                 self._populate_param_table()
             except Exception:
