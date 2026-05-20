@@ -8,7 +8,7 @@ Usage (from project root in PowerShell):
 What it does:
 - creates a local virtual environment `.venv` (if missing)
 - installs project requirements and PyInstaller into the venv
-- runs PyInstaller to produce a single-file executable at `dist\peakfit_cli.exe`
+- runs PyInstaller to produce a single-file executable at `dist\peakfit.exe`
 
 The produced executable can be distributed to Windows users without installing Python
 or the project's Python libraries.
@@ -65,6 +65,12 @@ $venvPip = Join-Path $venv 'Scripts\\pip.exe'
 & $venvPip install --upgrade pip
 & $venvPip install -r requirements.txt pyinstaller
 
+# Fail early if the GUI runtime stack is not importable in the venv.
+& $venvPython -c "import matplotlib; import matplotlib.backends.backend_qtagg; import PySide6; print('GUI deps OK')"
+if ($LASTEXITCODE -ne 0) {
+    throw "Required GUI dependencies are missing in the build venv (matplotlib/PySide6)."
+}
+
 # PyInstaller --add-data expects 'SRC;DEST' on Windows.
 $configsDir = Join-Path $root 'configs'
 $assetsDir = Join-Path $root 'assets'
@@ -80,6 +86,10 @@ $args = @(
     '--name', 'peakfit',
     '--add-data', $addDataConfigs,
     '--collect-data', 'plotly',
+    '--collect-all', 'matplotlib',
+    '--hidden-import', 'matplotlib',
+    '--hidden-import', 'matplotlib.backends.backend_qtagg',
+    '--hidden-import', 'matplotlib.backends.qt_compat',
     '--hidden-import', 'lmfit',
     '--hidden-import', 'plotly',
     '--hidden-import', 'pkg_resources.py2_warn',

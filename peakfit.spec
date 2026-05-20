@@ -1,16 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:\\Users\\admin\\Downloads\\PCM_Fano_GUI\\configs', 'configs'), ('C:\\Users\\admin\\Downloads\\PCM_Fano_GUI\\assets', 'assets')]
+datas = [('E:\\VS_CODE\\PCM_Fano_GUI\\configs', 'configs'), ('E:\\VS_CODE\\PCM_Fano_GUI\\assets', 'assets')]
+binaries = []
+hiddenimports = ['matplotlib', 'matplotlib.backends.backend_qtagg', 'matplotlib.backends.qt_compat', 'lmfit', 'plotly', 'pkg_resources.py2_warn', 'PySide6', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore']
 datas += collect_data_files('plotly')
+tmp_ret = collect_all('matplotlib')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['scripts\\gui_app.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=['lmfit', 'plotly', 'pkg_resources.py2_warn', 'PySide6', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -24,7 +24,7 @@ try:
                                    QTableWidgetItem, QCheckBox, QProgressBar, QLabel,
                                    QHeaderView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox,
                                    QPlainTextEdit)
-    from PySide6.QtGui import QDoubleValidator
+    from PySide6.QtGui import QDoubleValidator, QColor, QPalette
 except Exception as e:
     raise ImportError("PySide6 is required to run the GUI: " + str(e))
 
@@ -335,10 +335,42 @@ class MainWindow(QMainWindow):
     def _apply_app_style(self):
         """Apply a lightweight modern theme for readability and contrast."""
         try:
+            app = QApplication.instance()
+            if app is not None:
+                try:
+                    app.setStyle('Fusion')
+                except Exception:
+                    pass
+                try:
+                    pal = QPalette()
+                    pal.setColor(QPalette.Window, QColor('#f4f7fb'))
+                    pal.setColor(QPalette.WindowText, QColor('#1d2a38'))
+                    pal.setColor(QPalette.Base, QColor('#ffffff'))
+                    pal.setColor(QPalette.AlternateBase, QColor('#f8fbff'))
+                    pal.setColor(QPalette.ToolTipBase, QColor('#ffffff'))
+                    pal.setColor(QPalette.ToolTipText, QColor('#1d2a38'))
+                    pal.setColor(QPalette.Text, QColor('#1d2a38'))
+                    pal.setColor(QPalette.Button, QColor('#eef3f9'))
+                    pal.setColor(QPalette.ButtonText, QColor('#1d2a38'))
+                    pal.setColor(QPalette.BrightText, QColor('#ffffff'))
+                    pal.setColor(QPalette.Highlight, QColor('#1f4e79'))
+                    pal.setColor(QPalette.HighlightedText, QColor('#ffffff'))
+                    pal.setColor(QPalette.Disabled, QPalette.Text, QColor('#6f8196'))
+                    pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor('#6f8196'))
+                    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor('#6f8196'))
+                    app.setPalette(pal)
+                except Exception:
+                    pass
+
             self.setStyleSheet(
                 """
                 QMainWindow { background: #f4f7fb; }
-                QWidget { font-family: 'Segoe UI Variable', 'Segoe UI', 'Candara', sans-serif; font-size: 10pt; }
+                QWidget {
+                    font-family: 'Segoe UI Variable', 'Segoe UI', 'Candara', sans-serif;
+                    font-size: 10pt;
+                    color: #1d2a38;
+                }
+                QLabel, QCheckBox { color: #1d2a38; }
                 QPushButton {
                     background-color: #1f4e79;
                     color: #ffffff;
@@ -349,20 +381,26 @@ class MainWindow(QMainWindow):
                 QPushButton:hover { background-color: #2b6396; }
                 QPushButton:disabled {
                     background-color: #9aa8b8;
-                    color: #e9edf2;
+                    color: #f7f9fc;
                     border-color: #8c99a8;
                 }
                 QLineEdit, QComboBox, QPlainTextEdit {
                     background: #ffffff;
+                    color: #1d2a38;
                     border: 1px solid #c7d2df;
                     border-radius: 5px;
                     padding: 2px 6px;
+                    selection-background-color: #1f4e79;
+                    selection-color: #ffffff;
                 }
                 QSpinBox, QDoubleSpinBox {
                     background: #ffffff;
+                    color: #1d2a38;
                     border: 1px solid #c7d2df;
                     border-radius: 5px;
                     padding: 1px 22px 1px 6px;
+                    selection-background-color: #1f4e79;
+                    selection-color: #ffffff;
                 }
                 QSpinBox::up-button, QDoubleSpinBox::up-button {
                     subcontrol-origin: border;
@@ -396,9 +434,16 @@ class MainWindow(QMainWindow):
                 }
                 QTableWidget {
                     background: #ffffff;
+                    color: #1d2a38;
                     alternate-background-color: #f8fbff;
                     border: 1px solid #c7d2df;
                     gridline-color: #dde5ef;
+                    selection-background-color: #1f4e79;
+                    selection-color: #ffffff;
+                }
+                QTableWidget::item {
+                    color: #1d2a38;
+                    background: #ffffff;
                 }
                 QHeaderView::section {
                     background-color: #e8eef6;
@@ -406,15 +451,57 @@ class MainWindow(QMainWindow):
                     border: 1px solid #d0d9e4;
                     padding: 4px;
                 }
+                QComboBox QAbstractItemView {
+                    background: #ffffff;
+                    color: #1d2a38;
+                    selection-background-color: #1f4e79;
+                    selection-color: #ffffff;
+                    border: 1px solid #c7d2df;
+                }
+                QToolBar {
+                    background: #eef3f9;
+                    border: 1px solid #d6e0ec;
+                    color: #1d2a38;
+                    spacing: 4px;
+                }
+                QToolButton {
+                    color: #1d2a38;
+                    background: #eef3f9;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                    padding: 3px 6px;
+                }
+                QToolButton:hover {
+                    background: #dce8f4;
+                    border-color: #b9cbe0;
+                }
                 QProgressBar {
                     border: 1px solid #c7d2df;
                     border-radius: 6px;
+                    color: #1d2a38;
                     text-align: center;
                     background: #eef3f9;
                 }
                 QProgressBar::chunk { background-color: #1f4e79; border-radius: 4px; }
                 """
             )
+
+            # Force readable matplotlib foreground/background regardless of OS theme.
+            try:
+                self.figure.set_facecolor('#ffffff')
+                for ax in (getattr(self, 'ax_main', None), getattr(self, 'ax_resid', None)):
+                    if ax is None:
+                        continue
+                    ax.set_facecolor('#ffffff')
+                    ax.tick_params(colors='#1d2a38', labelcolor='#1d2a38')
+                    ax.xaxis.label.set_color('#1d2a38')
+                    ax.yaxis.label.set_color('#1d2a38')
+                    for spine in ax.spines.values():
+                        spine.set_color('#7a8da3')
+                if getattr(self, 'canvas', None) is not None:
+                    self.canvas.draw_idle()
+            except Exception:
+                pass
         except Exception:
             pass
 
