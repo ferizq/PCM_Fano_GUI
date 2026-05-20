@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = [('configs', 'configs'), ('assets', 'assets')]
+datas += collect_data_files('plotly')
 
 
 a = Analysis(
     ['scripts\\gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('E:\\VS_CODE\\PCM_Fano_GUI\\configs\\\\default_params.json', 'configs')],
+    datas=datas,
     hiddenimports=['lmfit', 'plotly', 'pkg_resources.py2_warn', 'PySide6', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
     hookspath=[],
     hooksconfig={},

@@ -5,22 +5,110 @@ import numpy as np
 from .model import model as model_func
 
 
+_NUMERIC_EPS = 1e-24
+
+
+def _coerce_vary_flag(raw_vary: Any) -> bool:
+    """Coerce flexible JSON/UI values to a boolean vary flag."""
+    if isinstance(raw_vary, bool):
+        return raw_vary
+    if isinstance(raw_vary, (int, float)):
+        return bool(raw_vary)
+    if isinstance(raw_vary, str):
+        return raw_vary.strip().lower() in ("true", "1", "yes", "y", "t")
+    return bool(raw_vary)
+
+
+def _clamp_to_bounds(value: float, lower: float, upper: float) -> float:
+    if np.isfinite(lower):
+        value = max(value, float(lower))
+    if np.isfinite(upper):
+        value = min(value, float(upper))
+    return float(value)
+
+
+def _build_integrator_kwargs(integrator_opts: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'integrator': integrator_opts.get('integrator', 'grid'),
+        'grid_size': int(integrator_opts.get('grid_size', 4000)),
+        'ik_min': float(integrator_opts.get('ik_min', 0.0)),
+        'ik_max': float(integrator_opts.get('ik_max', 1.0)),
+        'quad_opts': integrator_opts.get('quad_opts', None),
+        'kernel': integrator_opts.get('kernel', 'PCM_Fano_Bessel'),
+        'accelerator': integrator_opts.get('accelerator', 'auto')
+    }
+
+
+def _compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    try:
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
+    except Exception:
+        return float('nan')
+
+
+def _finite_diff_step(value: float, rel_step: float = 1e-6, abs_floor: float = 1e-8) -> float:
+    return max(abs_floor, rel_step * max(1.0, abs(float(value))))
+
+
+def _autoscale_initial_vector(iw: np.ndarray,
+                              y: np.ndarray,
+                              p0: np.ndarray,
+                              bounds: Tuple[np.ndarray, np.ndarray],
+                              free_names,
+                              param_config: Dict[str, Any],
+                              param_template: Dict[str, float],
+                              integrator_opts: Dict[str, Any],
+                              integrator_kwargs: Dict[str, Any]) -> np.ndarray:
+    """Best-effort autoscaling for y0 and N using one cheap grid evaluation."""
+    if not integrator_opts.get('autoscale', True):
+        return np.asarray(p0, dtype=float)
+
+    p_scaled = np.asarray(p0, dtype=float).copy()
+    lower_bounds, upper_bounds = bounds
+    name_to_idx = {n: idx for idx, n in enumerate(free_names)}
+    if not name_to_idx:
+        return p_scaled
+
+    y_mean = float(np.mean(y))
+    y_range = float(np.max(y) - np.min(y))
+
+    if 'y0' in name_to_idx:
+        idx_y0 = name_to_idx['y0']
+        p_scaled[idx_y0] = _clamp_to_bounds(y_mean, lower_bounds[idx_y0], upper_bounds[idx_y0])
+
+    if 'N' in name_to_idx:
+        idx_N = name_to_idx['N']
+        tmp_p = p_scaled.copy()
+        tmp_p[idx_N] = 1.0
+        tmp_params = _params_from_vector(free_names, tmp_p, param_config, template=param_template)
+        tmp_params['y0'] = 0.0
+
+        grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 4000) // 4))))
+        y_probe = model_func(
+            iw,
+            tmp_params,
+            integrator='grid',
+            grid_size=grid_size,
+            kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'),
+            accelerator=integrator_kwargs.get('accelerator', 'auto')
+        )
+        amp_model = float(np.ptp(np.asarray(y_probe, dtype=float)))
+        if amp_model > 0 and np.isfinite(amp_model):
+            n0 = y_range / (amp_model + _NUMERIC_EPS)
+            p_scaled[idx_N] = _clamp_to_bounds(n0, lower_bounds[idx_N], upper_bounds[idx_N])
+
+    return p_scaled
+
+
 def _build_free_params(config: Dict[str, Any]):
     free_names = []
     p0 = []
     lower = []
     upper = []
     for name, info in config.items():
-        # robustly coerce 'vary' to boolean (allow strings like 'false', numeric 0, etc.)
-        raw_vary = info.get("vary", True)
-        if isinstance(raw_vary, bool):
-            vary = raw_vary
-        elif isinstance(raw_vary, (int, float)):
-            vary = bool(raw_vary)
-        elif isinstance(raw_vary, str):
-            vary = raw_vary.strip().lower() in ("true", "1", "yes", "y", "t")
-        else:
-            vary = bool(raw_vary)
+        vary = _coerce_vary_flag(info.get("vary", True))
         if vary:
             free_names.append(name)
             p0.append(float(info.get("value", 0.0)))
@@ -29,19 +117,21 @@ def _build_free_params(config: Dict[str, Any]):
     return free_names, np.array(p0), (np.array(lower, dtype=float), np.array(upper, dtype=float))
 
 
-def _params_from_vector(free_names, pvec, config: Dict[str, Any]):
+def _build_param_template(config: Dict[str, Any]) -> Dict[str, float]:
+    return {name: float(info.get("value", 0.0)) for name, info in config.items()}
+
+
+def _params_from_vector(free_names, pvec, config: Dict[str, Any], template: Dict[str, float] = None):
+    if template is not None:
+        params = template.copy()
+        for j, name in enumerate(free_names):
+            params[name] = float(pvec[j])
+        return params
+
     params = {}
     j = 0
     for name, info in config.items():
-        raw_vary = info.get("vary", True)
-        if isinstance(raw_vary, bool):
-            vary = raw_vary
-        elif isinstance(raw_vary, (int, float)):
-            vary = bool(raw_vary)
-        elif isinstance(raw_vary, str):
-            vary = raw_vary.strip().lower() in ("true", "1", "yes", "y", "t")
-        else:
-            vary = bool(raw_vary)
+        vary = _coerce_vary_flag(info.get("vary", True))
         if vary:
             params[name] = float(pvec[j])
             j += 1
@@ -66,74 +156,30 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
     integrator_opts = integrator_opts or {}
     curvefit_opts = curvefit_opts or {}
 
-    # Build a clean set of kwargs for the model() function so extra UI keys
-    # (e.g. 'autoscale') are not passed through causing unexpected-kwarg errors.
-    integrator_kwargs = {
-        'integrator': integrator_opts.get('integrator', 'grid'),
-        'grid_size': int(integrator_opts.get('grid_size', 4000)),
-        'ik_min': float(integrator_opts.get('ik_min', 0.0)),
-        'ik_max': float(integrator_opts.get('ik_max', 1.0)),
-        'quad_opts': integrator_opts.get('quad_opts', None),
-        'kernel': integrator_opts.get('kernel', 'PCM_Fano_Bessel')
-    }
+    integrator_kwargs = _build_integrator_kwargs(integrator_opts)
 
     free_names, p0, bounds = _build_free_params(param_config)
+    param_template = _build_param_template(param_config)
     if len(free_names) == 0:
-        params_full = {name: float(info.get("value", 0.0)) for name, info in param_config.items()}
+        params_full = param_template.copy()
         errs_full = {name: None for name in param_config.keys()}
         y_model = model_func(iw, params_full, **integrator_kwargs)
-        # compute R^2
-        ss_res = np.sum((y - y_model) ** 2)
-        ss_tot = np.sum((y - np.mean(y)) ** 2)
-        r2 = float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
+        r2 = _compute_r2(y, y_model)
         # No fitting performed; treat as converged
         return params_full, errs_full, None, None, y_model, r2, True, "no free parameters", 0
 
-    # Autoscale sensible initial guesses for `y0` and `N` to improve conditioning.
-    # Use a cheap grid evaluation (small grid) for the amplitude estimate so
-    # we don't invoke the expensive 'quad' integrator here. Only do this
-    # when integrator_opts explicitly allow autoscaling (UI toggle).
     try:
-        if integrator_opts.get('autoscale', True):
-            # local copies
-            p0 = p0.astype(float)
-            lower_bounds, upper_bounds = bounds
-            # compute some simple data statistics
-            y_mean = float(np.mean(y))
-            y_range = float(np.max(y) - np.min(y))
-            # map free_names -> index
-            name_to_idx = {n: idx for idx, n in enumerate(free_names)}
-            # if y0 is free, initialize it to data mean (clamped)
-            if 'y0' in name_to_idx:
-                idx_y0 = name_to_idx['y0']
-                y0_guess = y_mean
-                lo = lower_bounds[idx_y0]
-                hi = upper_bounds[idx_y0]
-                if np.isfinite(lo):
-                    y0_guess = max(y0_guess, lo)
-                if np.isfinite(hi):
-                    y0_guess = min(y0_guess, hi)
-                p0[idx_y0] = float(y0_guess)
-            # if N is free, estimate a starting scale by evaluating the model with N=1
-            if 'N' in name_to_idx:
-                idx_N = name_to_idx['N']
-                tmp_p = p0.copy()
-                tmp_p[idx_N] = 1.0
-                tmp_params = _params_from_vector(free_names, tmp_p, param_config)
-                # force zero baseline for amplitude estimate
-                tmp_params['y0'] = 0.0
-                # use a smaller grid for speed
-                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 4000) // 4))))
-                amp_model = np.max(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))) - np.min(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel')))
-                if amp_model > 0 and np.isfinite(amp_model):
-                    N0 = float(y_range / (amp_model + 1e-24))
-                    lo = lower_bounds[idx_N]
-                    hi = upper_bounds[idx_N]
-                    if np.isfinite(lo):
-                        N0 = max(N0, lo)
-                    if np.isfinite(hi):
-                        N0 = min(N0, hi)
-                    p0[idx_N] = float(N0)
+        p0 = _autoscale_initial_vector(
+            iw=iw,
+            y=y,
+            p0=p0,
+            bounds=bounds,
+            free_names=free_names,
+            param_config=param_config,
+            param_template=param_template,
+            integrator_opts=integrator_opts,
+            integrator_kwargs=integrator_kwargs
+        )
     except Exception:
         # autoscale best-effort: ignore failures and proceed with original p0
         pass
@@ -148,14 +194,14 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                 cont = True
             if not cont:
                 raise RuntimeError('fitting cancelled by user')
-        params_full = _params_from_vector(free_names, pvec, param_config)
+        params_full = _params_from_vector(free_names, pvec, param_config, template=param_template)
         return model_func(iw_vals, params_full, **integrator_kwargs)
 
     converged = False
     message = ""
     try:
         popt, pcov = curve_fit(fitfunc, iw, y, p0=p0, bounds=bounds, **curvefit_opts)
-        params_full = _params_from_vector(free_names, popt, param_config)
+        params_full = _params_from_vector(free_names, popt, param_config, template=param_template)
         converged = True
         message = "ok"
         # If covariance is not usable, mark as not converged
@@ -171,15 +217,10 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
         message = f"curve_fit failed: {e}"
         popt = p0
         pcov = None
-        params_full = _params_from_vector(free_names, popt, param_config)
+        params_full = _params_from_vector(free_names, popt, param_config, template=param_template)
         errs_full = {name: None for name in param_config.keys()}
         y_model = model_func(iw, params_full, **integrator_kwargs)
-        try:
-            ss_res = np.sum((y - y_model) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            r2 = float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
-        except Exception:
-            r2 = float('nan')
+        r2 = _compute_r2(y, y_model)
         return params_full, errs_full, popt, pcov, y_model, r2, converged, message, call_count['n']
 
     # compute parameter uncertainties (standard deviations)
@@ -195,13 +236,7 @@ def fit_with_scipy(iw, y, param_config: Dict[str, Any], integrator_opts=None,
 
     y_model = model_func(iw, params_full, **integrator_kwargs)
 
-    # compute R^2
-    try:
-        ss_res = np.sum((y - y_model) ** 2)
-        ss_tot = np.sum((y - np.mean(y)) ** 2)
-        r2 = float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
-    except Exception:
-        r2 = float('nan')
+    r2 = _compute_r2(y, y_model)
 
     return params_full, errs_full, popt, pcov, y_model, r2, converged, message, call_count['n']
 
@@ -219,54 +254,31 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
     integrator_opts = integrator_opts or {}
     minimizer_opts = minimizer_opts or {}
 
-    # Build a clean set of kwargs for the model() function so extra UI keys
-    # (e.g. 'autoscale') are not passed through causing unexpected-kwarg errors.
-    integrator_kwargs = {
-        'integrator': integrator_opts.get('integrator', 'grid'),
-        'grid_size': int(integrator_opts.get('grid_size', 4000)),
-        'ik_min': float(integrator_opts.get('ik_min', 0.0)),
-        'ik_max': float(integrator_opts.get('ik_max', 1.0)),
-        'quad_opts': integrator_opts.get('quad_opts', None),
-        'kernel': integrator_opts.get('kernel', 'PCM_Fano_Bessel')
-    }
+    integrator_kwargs = _build_integrator_kwargs(integrator_opts)
+    param_template = _build_param_template(param_config)
 
     params = lmfit.Parameters()
-    # Autoscale initial guesses for `y0` and `N` (best-effort; use a small grid)
+    # Autoscale initial guesses for y0 and N (best-effort, shared logic).
     try:
         y0_guess = None
         N0 = None
-        if integrator_opts.get('autoscale', True):
-            free_names, p0, bounds = _build_free_params(param_config)
-            p0 = p0.astype(float)
-            lower_bounds, upper_bounds = bounds
-            y_mean = float(np.mean(y))
-            y_range = float(np.max(y) - np.min(y))
-            name_to_idx = {n: idx for idx, n in enumerate(free_names)}
-            if 'y0' in name_to_idx:
-                idx_y0 = name_to_idx['y0']
-                y0_guess = y_mean
-                lo = lower_bounds[idx_y0]
-                hi = upper_bounds[idx_y0]
-                if np.isfinite(lo):
-                    y0_guess = max(y0_guess, lo)
-                if np.isfinite(hi):
-                    y0_guess = min(y0_guess, hi)
-            if 'N' in name_to_idx:
-                idx_N = name_to_idx['N']
-                tmp_p = p0.copy()
-                tmp_p[idx_N] = 1.0
-                tmp_params = _params_from_vector(free_names, tmp_p, param_config)
-                tmp_params['y0'] = 0.0
-                grid_size = int(max(64, min(400, int(integrator_opts.get('grid_size', 4000) // 4))))
-                amp_model = np.max(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size)) - np.min(model_func(iw, tmp_params, integrator='grid', grid_size=grid_size))
-                if amp_model > 0 and np.isfinite(amp_model):
-                    N0 = float(y_range / (amp_model + 1e-24))
-                    lo = lower_bounds[idx_N]
-                    hi = upper_bounds[idx_N]
-                    if np.isfinite(lo):
-                        N0 = max(N0, lo)
-                    if np.isfinite(hi):
-                        N0 = min(N0, hi)
+        free_names, p0, bounds = _build_free_params(param_config)
+        p0_auto = _autoscale_initial_vector(
+            iw=iw,
+            y=y,
+            p0=p0,
+            bounds=bounds,
+            free_names=free_names,
+            param_config=param_config,
+            param_template=param_template,
+            integrator_opts=integrator_opts,
+            integrator_kwargs=integrator_kwargs
+        )
+        name_to_idx = {n: idx for idx, n in enumerate(free_names)}
+        if 'y0' in name_to_idx:
+            y0_guess = float(p0_auto[name_to_idx['y0']])
+        if 'N' in name_to_idx:
+            N0 = float(p0_auto[name_to_idx['N']])
     except Exception:
         y0_guess = None
         N0 = None
@@ -283,7 +295,7 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
             init_val = float(y0_guess)
         if name == 'N' and N0 is not None:
             init_val = float(N0)
-        params.add(name, value=init_val, vary=info.get("vary", True), **kwargs)
+        params.add(name, value=init_val, vary=_coerce_vary_flag(info.get("vary", True)), **kwargs)
 
     call_count = {'n': 0}
     def resid(p):
@@ -310,12 +322,7 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
         converged = False
         message = 'fitting cancelled by user'
         y_model = model_func(iw, fitted, **integrator_kwargs)
-        try:
-            ss_res = np.sum((y - y_model) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            r2 = float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
-        except Exception:
-            r2 = float('nan')
+        r2 = _compute_r2(y, y_model)
         return fitted, errs, None, y_model, r2, converged, message, call_count['n']
 
     fitted = {n: float(result.params[n].value) for n in result.params}
@@ -324,12 +331,7 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
     converged = bool(getattr(result, 'success', False))
     message = str(getattr(result, 'message', ''))
     y_model = model_func(iw, fitted, **integrator_kwargs)
-    try:
-        ss_res = np.sum((y - y_model) ** 2)
-        ss_tot = np.sum((y - np.mean(y)) ** 2)
-        r2 = float(1.0 - ss_res / ss_tot) if ss_tot != 0 else float('nan')
-    except Exception:
-        r2 = float('nan')
+    r2 = _compute_r2(y, y_model)
     # Attempt to compute/attach a covariance matrix (pcov) for downstream
     # diagnostics (correlations). Prefer any existing `result.covar`/`covariance`.
     # If missing, try several fallbacks: Jacobian-based estimate, then a
@@ -379,7 +381,6 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                     pvec_fitted = np.array([float(fitted.get(n, param_config[n].get('value', 0.0))) for n in free_names], dtype=float)
                     ndata = np.asarray(iw).size
                     Jfd = np.zeros((ndata, nfree), dtype=float)
-                    eps = 1e-6
                     # choose a smaller grid size for FD if available
                     try:
                         fd_grid = int(min(200, int(integrator_kwargs.get('grid_size', 4000))))
@@ -387,19 +388,17 @@ def fit_with_lmfit(iw, y, param_config: Dict[str, Any], integrator_opts=None,
                         fd_grid = 100
                     for j in range(nfree):
                         pj = pvec_fitted[j]
-                        dp = eps * max(1.0, abs(pj))
-                        if dp == 0:
-                            dp = eps
+                        dp = _finite_diff_step(pj)
                         p_plus = pvec_fitted.copy()
                         p_minus = pvec_fitted.copy()
                         p_plus[j] += dp
                         p_minus[j] -= dp
-                        params_plus = _params_from_vector(free_names, p_plus, param_config)
-                        params_minus = _params_from_vector(free_names, p_minus, param_config)
+                        params_plus = _params_from_vector(free_names, p_plus, param_config, template=param_template)
+                        params_minus = _params_from_vector(free_names, p_minus, param_config, template=param_template)
                         # Prefer a fast grid evaluation for FD
                         try:
-                            y_plus = model_func(iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))
-                            y_minus = model_func(iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'))
+                            y_plus = model_func(iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'), accelerator=integrator_kwargs.get('accelerator', 'auto'))
+                            y_minus = model_func(iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=integrator_kwargs.get('kernel', 'PCM_Fano_Bessel'), accelerator=integrator_kwargs.get('accelerator', 'auto'))
                         except Exception:
                             y_plus = model_func(iw, params_plus, **integrator_kwargs)
                             y_minus = model_func(iw, params_minus, **integrator_kwargs)

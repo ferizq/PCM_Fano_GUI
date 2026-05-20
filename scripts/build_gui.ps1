@@ -26,7 +26,7 @@ $venvPip = Join-Path $venv 'Scripts\pip.exe'
 & $venvPip install -r requirements.txt pyinstaller
 
 # Add data for configs and assets
-$cfg = Join-Path $root 'configs\default_params.json'
+$cfg = Join-Path $root 'configs'
 $assets = Join-Path $root 'assets'
 $addDataCfg = "$cfg;configs"
 if (Test-Path $assets) {
@@ -40,7 +40,8 @@ Write-Host "Running PyInstaller to build folder-based GUI (this may take a while
 $args = @(
     '--noconfirm',
     '--windowed',
-    '--name', 'peakfit_gui'
+    '--name', 'peakfit_gui',
+    '--collect-data', 'plotly'
 )
 if ($addDataCfg) { $args += '--add-data'; $args += $addDataCfg }
 if ($addDataAssets) { $args += '--add-data'; $args += $addDataAssets }

@@ -21,12 +21,13 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
              output_html: str = "fit_plot.html", show: bool = True,
              converged: Optional[bool] = None, convergence_message: Optional[str] = None,
              assets_dir: Optional[str] = None, kernel: Optional[str] = None,
-             x_range: Optional[tuple] = None):
+             x_range: Optional[tuple] = None, accelerator: Optional[str] = 'auto'):
     """Create an HTML output with plots on the left and the math definition on the right.
 
     If `assets_dir` is provided and exists, the generated HTML will reference
-    `plotly.min.js`, `katex.min.css`, `katex.min.js` and `auto-render.min.js` from
-    that folder using relative paths. Otherwise CDN links will be used.
+    local `plotly.min.js` and KaTeX files from that folder using relative paths.
+    Without local assets, Plotly is embedded inline and KaTeX rendering is skipped,
+    so the HTML remains fully offline.
     """
     iw = np.asarray(iw)
     y = np.asarray(y)
@@ -68,7 +69,7 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
     gauss_components = None
     if params is not None:
       try:
-        base, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel)
+        base, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel, accelerator=accelerator)
         y_model_calc = np.asarray(base) + np.asarray(gauss_total) + np.asarray(lorentz_total)
       except Exception:
         base = None
@@ -132,32 +133,25 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         fig_resid.update_xaxes(range=[float(lo), float(hi)])
         # Autoscale residuals y-axis based on residuals inside the x_range
         try:
-            mask = (np.asarray(iw) >= float(lo)) & (np.asarray(iw) <= float(hi))
-            if np.any(mask):
-                resid_mask = residuals[mask]
-                ymin = float(np.min(resid_mask))
-                ymax = float(np.max(resid_mask))
-                if ymin == ymax:
-                    ymin -= 1e-6
-                    ymax += 1e-6
-                pad = max(1e-6, 0.05 * (ymax - ymin))
-                fig_resid.update_yaxes(range=[ymin - pad, ymax + pad])
+          mask = (np.asarray(iw) >= float(lo)) & (np.asarray(iw) <= float(hi))
+          if np.any(mask):
+            resid_mask = residuals[mask]
+            ymin = float(np.min(resid_mask))
+            ymax = float(np.max(resid_mask))
+            if ymin == ymax:
+              ymin -= 1e-6
+              ymax += 1e-6
+            pad = max(1e-6, 0.05 * (ymax - ymin))
+            fig_resid.update_yaxes(range=[ymin - pad, ymax + pad])
         except Exception:
-            pass
+          pass
       except Exception:
         pass
 
-    # Convert figures to HTML fragments. If local assets are available we will
-    # reference them; otherwise embed Plotly into the main fragment so the
-    # exported HTML is self-contained and shows plots offline.
-    use_local_plotly = assets_dir is not None and os.path.isdir(assets_dir) and os.path.isfile(os.path.join(assets_dir, 'plotly.min.js'))
-    if use_local_plotly:
-      main_div = fig_main.to_html(full_html=False, include_plotlyjs=False)
-      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
-    else:
-      # embed plotly JS into the main fragment to avoid external CDN dependency
-      main_div = fig_main.to_html(full_html=False, include_plotlyjs=True)
-      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
+    # Export reports as fully self-contained HTML for offline portability.
+    # Plotly is embedded directly in the main figure fragment.
+    main_div = fig_main.to_html(full_html=False, include_plotlyjs=True, include_mathjax=False)
+    resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False, include_mathjax=False)
 
     # Build HTML parameter table (regular HTML so markup like <sup> works and text is selectable)
     table_html_lines = [
@@ -209,23 +203,27 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         msg = _html_escape(convergence_message or '')
         status_html = f"<div id=\"fit-status\" style=\"padding:8px;border-radius:6px;background:#ffecec;color:#8b0000;margin-bottom:8px;font-weight:600;\">Fit failed: {msg}</div>"
 
-    # Determine asset URLs (either local relative paths or CDN links)
-    plotly_src = 'https://cdn.plot.ly/plotly-latest.min.js'
-    katex_css = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css'
-    katex_js = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js'
-    katex_autorender = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js'
-    # Only use local assets when the expected JS file exists in the assets dir.
-    if use_local_plotly:
-        out_dir = os.path.abspath(os.path.dirname(output_html) or '.')
-        try:
-            rel = os.path.relpath(os.path.abspath(assets_dir), out_dir)
-        except Exception:
-            rel = os.path.abspath(assets_dir)
-        rel = rel.replace('\\', '/')
-        plotly_src = f"{rel}/plotly.min.js"
-        katex_css = f"{rel}/katex.min.css"
-        katex_js = f"{rel}/katex.min.js"
-        katex_autorender = f"{rel}/auto-render.min.js"
+    # Inline KaTeX only when local assets are available.
+    katex_head = ''
+    if assets_dir is not None and os.path.isdir(assets_dir):
+      katex_css = os.path.join(os.path.abspath(assets_dir), 'katex.min.css')
+      katex_js = os.path.join(os.path.abspath(assets_dir), 'katex.min.js')
+      katex_autorender = os.path.join(os.path.abspath(assets_dir), 'auto-render.min.js')
+      try:
+        if os.path.isfile(katex_css) and os.path.isfile(katex_js) and os.path.isfile(katex_autorender):
+          with open(katex_css, 'r', encoding='utf-8') as f:
+            css_txt = f.read()
+          with open(katex_js, 'r', encoding='utf-8') as f:
+            js_txt = f.read().replace('</script>', '<\\/script>')
+          with open(katex_autorender, 'r', encoding='utf-8') as f:
+            autorender_txt = f.read().replace('</script>', '<\\/script>')
+          katex_head = (
+            f'<style>{css_txt}</style>\n'
+            f'<script type="text/javascript">{js_txt}</script>\n'
+            f'<script type="text/javascript">{autorender_txt}</script>'
+          )
+      except Exception:
+        katex_head = ''
 
     # Compose final HTML using a CSS grid (2 rows x 3 columns) with fixed plot sizes
     html_template = """<!doctype html>
@@ -233,10 +231,7 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
   <head>
     <meta charset="utf-8">
     <title>Peak fit</title>
-    <link rel="stylesheet" href="%%KATEX_CSS%%">
-    %%PLOTLY_HEAD%%
-    <script defer src="%%KATEX_JS%%"></script>
-    <script defer src="%%KATEX_AUTORENDER%%"></script>
+    %%KATEX_HEAD%%
     <style>
       body { font-family: Arial, sans-serif; margin: 10px; }
       .status { grid-column: 1 / span 3; }
@@ -274,25 +269,13 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
   </body>
 </html>"""
 
-    # Decide what to place in the header for Plotly (either a script tag
-    # referencing a local file / CDN, or empty when Plotly is already
-    # embedded into `main_div`).
-    if use_local_plotly:
-      plotly_head = f"<script src=\"{plotly_src}\"></script>"
-    else:
-      # main_div already embeds Plotly when local assets are not available
-      plotly_head = ''
-
     html = (html_template
         .replace('%%MAIN_DIV%%', main_div)
         .replace('%%RESID_DIV%%', resid_div)
         .replace('%%TABLE_HTML%%', table_html)
         .replace('%%MATH_BLOCK%%', math_block)
         .replace('%%STATUS_HTML%%', status_html)
-        .replace('%%PLOTLY_HEAD%%', plotly_head)
-        .replace('%%KATEX_CSS%%', katex_css)
-        .replace('%%KATEX_JS%%', katex_js)
-        .replace('%%KATEX_AUTORENDER%%', katex_autorender))
+        .replace('%%KATEX_HEAD%%', katex_head))
 
     # Inject JS that syncs the main plot x-range to the residuals plot
     sync_js = '''<script>
@@ -326,10 +309,10 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         f.write(html)
 
     if show:
-        try:
+      try:
             import webbrowser
             webbrowser.open('file://' + os.path.abspath(output_html))
-        except Exception:
+      except Exception:
             pass
 
     # Return the main figure for further programmatic use

@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+plotly_datas = collect_data_files('plotly')
+
 
 a = Analysis(
     ['scripts\\gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('E:\\VS_CODE\\PCM_Fano_GUI\\configs\\default_params.json', 'configs')],
+    datas=plotly_datas + [('configs', 'configs'), ('assets', 'assets')],
     hiddenimports=['lmfit', 'plotly'],
     hookspath=[],
     hooksconfig={},

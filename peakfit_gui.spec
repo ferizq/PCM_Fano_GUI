@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+plotly_datas = collect_data_files('plotly')
+
 
 a = Analysis(
     ['scripts\\gui_app.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('configs\\default_params.json', 'configs')],
+    datas=plotly_datas + [('configs', 'configs'), ('assets', 'assets')],
     hiddenimports=['lmfit', 'plotly', 'PySide6', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
     hookspath=[],
     hooksconfig={},

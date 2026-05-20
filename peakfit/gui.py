@@ -20,7 +20,7 @@ import copy
 
 try:
     from PySide6 import QtCore, QtWidgets
-    from PySide6.QtCore import QUrl
+    from PySide6.QtCore import QUrl, QLocale
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QPushButton, QFileDialog, QTableWidget,
                                    QTableWidgetItem, QCheckBox, QProgressBar, QLabel,
@@ -34,7 +34,7 @@ except Exception as e:
 
 from .io import load_data, load_param_config, normalize_number_string
 from .fitting import fit_with_lmfit, fit_with_scipy, _build_free_params, _params_from_vector
-from .model import model as compute_model, model_components
+from .model import model as compute_model, model_components, resolve_accelerator_mode
 
 # Built-in default parameter sets used to initialize the GUI when the user
 # selects a kernel. These mirror the values used in the test fixtures /
@@ -109,13 +109,18 @@ class FitWorker(QtCore.QObject):
             self.progress.emit(call_n)
             return not self._cancel
 
+        accel_used = resolve_accelerator_mode(
+            self.integrator_opts.get('integrator', 'grid'),
+            self.integrator_opts.get('accelerator', 'auto'),
+        )
+
         try:
             if self.backend == 'lmfit':
                 fitted, errs, result, y_model, r2, converged, message, nfev = fit_with_lmfit(
                     self.iw, self.y, self.param_config,
                     integrator_opts=self.integrator_opts, minimizer_opts=self.minimizer_opts,
                     progress_callback=progress_cb)
-                out = dict(fitted=fitted, errs=errs, result=result, y_model=y_model, r2=r2, converged=converged, message=message, nfev=nfev)
+                out = dict(fitted=fitted, errs=errs, result=result, y_model=y_model, r2=r2, converged=converged, message=message, nfev=nfev, accelerator_used=accel_used)
                 # If the lmfit result contains a covariance matrix attach it
                 # explicitly in the out dict so the GUI can read it reliably.
                 try:
@@ -138,7 +143,7 @@ class FitWorker(QtCore.QObject):
                     self.iw, self.y, self.param_config,
                     integrator_opts=self.integrator_opts, curvefit_opts=self.minimizer_opts,
                     progress_callback=progress_cb)
-                out = dict(fitted=params_full, errs=errs_full, popt=popt, pcov=pcov, y_model=y_model, r2=r2, converged=converged, message=message, nfev=nfev)
+                out = dict(fitted=params_full, errs=errs_full, popt=popt, pcov=pcov, y_model=y_model, r2=r2, converged=converged, message=message, nfev=nfev, accelerator_used=accel_used)
             self.finished.emit(out)
         except Exception as e:
             self.error.emit(str(e))
@@ -158,8 +163,127 @@ class MainWindow(QMainWindow):
         self.fit_thread: QtCore.QThread | None = None
         self.fit_worker: FitWorker | None = None
         self.last_y_model = None
+        self._plotly_inline_js_cache = None
+        self._data_token = 0
 
         self._init_ui()
+        self._apply_app_style()
+        try:
+            self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}')
+        except Exception:
+            pass
+
+    def _apply_app_style(self):
+        """Apply a lightweight modern theme for readability and contrast."""
+        try:
+            self.setStyleSheet(
+                """
+                QMainWindow { background: #f4f7fb; }
+                QWidget { font-family: 'Segoe UI Variable', 'Segoe UI', 'Candara', sans-serif; font-size: 10pt; }
+                QPushButton {
+                    background-color: #1f4e79;
+                    color: #ffffff;
+                    border: 1px solid #183a5a;
+                    border-radius: 6px;
+                    padding: 4px 10px;
+                }
+                QPushButton:hover { background-color: #2b6396; }
+                QPushButton:disabled {
+                    background-color: #9aa8b8;
+                    color: #e9edf2;
+                    border-color: #8c99a8;
+                }
+                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
+                    background: #ffffff;
+                    border: 1px solid #c7d2df;
+                    border-radius: 5px;
+                    padding: 2px 6px;
+                }
+                QTableWidget {
+                    background: #ffffff;
+                    alternate-background-color: #f8fbff;
+                    border: 1px solid #c7d2df;
+                    gridline-color: #dde5ef;
+                }
+                QHeaderView::section {
+                    background-color: #e8eef6;
+                    color: #1d2a38;
+                    border: 1px solid #d0d9e4;
+                    padding: 4px;
+                }
+                QProgressBar {
+                    border: 1px solid #c7d2df;
+                    border-radius: 6px;
+                    text-align: center;
+                    background: #eef3f9;
+                }
+                QProgressBar::chunk { background-color: #1f4e79; border-radius: 4px; }
+                """
+            )
+        except Exception:
+            pass
+
+    def _new_float_validator(self):
+        v = QDoubleValidator()
+        try:
+            v.setNotation(QDoubleValidator.StandardNotation)
+            v.setLocale(QLocale.c())
+        except Exception:
+            pass
+        return v
+
+    def _normalize_decimal_line_edit(self, edit: QLineEdit):
+        try:
+            t = edit.text()
+            if ',' in t:
+                edit.setText(t.replace(',', '.'))
+        except Exception:
+            pass
+
+    def _selected_accelerator(self) -> str:
+        try:
+            if hasattr(self, 'accel_combo') and self.accel_combo is not None:
+                return str(self.accel_combo.currentText()).strip().lower()
+        except Exception:
+            pass
+        return 'auto'
+
+    def _effective_accelerator_label(self, integrator: str = None) -> str:
+        try:
+            integ = integrator if integrator is not None else (self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid')
+            return resolve_accelerator_mode(integ, self._selected_accelerator())
+        except Exception:
+            return 'numpy'
+
+    def _build_plotly_head(self):
+        """Return inline plotly script tag and base URL for local assets."""
+        base = QUrl('')
+        if self.assets_dir:
+            local_plotly = os.path.join(self.assets_dir, 'plotly.min.js')
+            if os.path.isfile(local_plotly):
+                try:
+                    with open(local_plotly, 'r', encoding='utf-8') as f:
+                        plotly_js = f.read()
+                    base = QUrl.fromLocalFile(os.path.abspath(self.assets_dir) + os.sep)
+                    return f"<script type=\"text/javascript\">{plotly_js}</script>", base
+                except Exception:
+                    pass
+
+        if self._plotly_inline_js_cache is None:
+            try:
+                import plotly
+                plotly_js_path = os.path.join(os.path.dirname(plotly.__file__), 'package_data', 'plotly.min.js')
+                with open(plotly_js_path, 'r', encoding='utf-8') as f:
+                    self._plotly_inline_js_cache = f.read()
+            except Exception:
+                try:
+                    from plotly.offline.offline import get_plotlyjs
+                    self._plotly_inline_js_cache = get_plotlyjs()
+                except Exception:
+                    self._plotly_inline_js_cache = ''
+        if self._plotly_inline_js_cache:
+            return f"<script type=\"text/javascript\">{self._plotly_inline_js_cache}</script>", base
+        return '<script type="text/javascript"></script>', base
 
     def _init_ui(self):
         # Use a QSplitter so the user can resize the control pane vs the plots.
@@ -210,7 +334,7 @@ class MainWindow(QMainWindow):
         ctrl_v = QVBoxLayout(ctrl_container)
         ctrl_v.setContentsMargins(0, 0, 0, 0)
 
-        # Row 1: backend + integrator
+        # Row 1: backend + integrator + accelerator
         ctrl_row1 = QWidget()
         ctrl1 = QHBoxLayout(ctrl_row1)
         ctrl1.setContentsMargins(0, 0, 0, 0)
@@ -222,6 +346,11 @@ class MainWindow(QMainWindow):
         self.integrator_combo = QComboBox()
         self.integrator_combo.addItems(['grid', 'quad'])
         ctrl1.addWidget(self.integrator_combo)
+        ctrl1.addWidget(QLabel('Accelerator:'))
+        self.accel_combo = QComboBox()
+        self.accel_combo.addItems(['auto', 'numba', 'numpy'])
+        self.accel_combo.setCurrentText('auto')
+        ctrl1.addWidget(self.accel_combo)
         ctrl_v.addWidget(ctrl_row1)
 
         # Row 2: kernel + fit range controls
@@ -273,6 +402,11 @@ class MainWindow(QMainWindow):
         self.autoscale_cb = QCheckBox()
         self.autoscale_cb.setChecked(True)
         ctrl2.addWidget(self.autoscale_cb)
+        ctrl2.addWidget(QLabel('Post-fit diagnostics'))
+        self.postfit_diag_cb = QCheckBox()
+        # Off by default to keep UI responsive after each fit.
+        self.postfit_diag_cb.setChecked(False)
+        ctrl2.addWidget(self.postfit_diag_cb)
         ctrl_v.addWidget(ctrl_row2)
 
         # Row 4: grid and preview options
@@ -313,9 +447,11 @@ class MainWindow(QMainWindow):
         try:
             self.backend_combo.setToolTip('Choose fitting backend: lmfit (rich features) or scipy (curve_fit)')
             self.integrator_combo.setToolTip('Integrator: "grid" is fast/approximate, "quad" is accurate but slow')
+            self.accel_combo.setToolTip('Acceleration mode for grid integrator: auto, numba, or numpy')
             self.lm_method_combo.setToolTip('Minimizer method used by lmfit; try least_squares or leastsq')
             self.maxeval_spin.setToolTip('Maximum function evaluations for a full fit')
             self.autoscale_cb.setToolTip('Autoscale initial guesses for N and y0 from the loaded data')
+            self.postfit_diag_cb.setToolTip('When enabled, run sensitivity and finite-difference correlation diagnostics after fit (slower)')
             self.grid_spin.setToolTip('Grid size used by the grid integrator (larger = more accurate/slower)')
             self.ik_min_spin.setToolTip('Lower integration limit (ik)')
             self.ik_max_spin.setToolTip('Upper integration limit (ik)')
@@ -334,6 +470,13 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
         left_l.addWidget(self.progress)
+
+        self.accel_indicator = QLabel('Accelerator: auto')
+        try:
+            self.accel_indicator.setToolTip('Effective accelerator used by model evaluation')
+        except Exception:
+            pass
+        left_l.addWidget(self.accel_indicator)
 
         # Fit status: use a scrollable plain-text box for long messages
         self.fit_status = QPlainTextEdit()
@@ -469,6 +612,11 @@ class MainWindow(QMainWindow):
             self.btn_kernel_info.clicked.connect(self._show_kernel_info)
         except Exception:
             pass
+        try:
+            self.accel_combo.currentTextChanged.connect(lambda *_: self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}'))
+            self.integrator_combo.currentTextChanged.connect(lambda *_: self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}'))
+        except Exception:
+            pass
 
     def load_data(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Open data file', '.', 'Text Files (*.txt);;All Files (*)')
@@ -556,7 +704,7 @@ class MainWindow(QMainWindow):
 
         kernel = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
         try:
-            y_model = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel)
+            y_model = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel, accelerator=self._selected_accelerator())
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', f'Preview generation failed: {e}')
             return
@@ -581,7 +729,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 val_str = str(val_raw)
             val_edit = QLineEdit(val_str)
-            val_edit.setValidator(QDoubleValidator())
+            val_edit.setValidator(self._new_float_validator())
+            val_edit.editingFinished.connect(lambda e=val_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 1, val_edit)
             # Std
             std_itm = QTableWidgetItem('')
@@ -598,7 +747,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 mn_str = str(mn)
             min_edit = QLineEdit(mn_str)
-            min_edit.setValidator(QDoubleValidator())
+            min_edit.setValidator(self._new_float_validator())
+            min_edit.editingFinished.connect(lambda e=min_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 4, min_edit)
             # Max (editable numeric)
             mx = info.get('max', '')
@@ -607,7 +757,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 mx_str = str(mx)
             max_edit = QLineEdit(mx_str)
-            max_edit.setValidator(QDoubleValidator())
+            max_edit.setValidator(self._new_float_validator())
+            max_edit.editingFinished.connect(lambda e=max_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 5, max_edit)
             # Correlation (filled after fit)
             corr_itm = QTableWidgetItem('')
@@ -700,11 +851,17 @@ class MainWindow(QMainWindow):
             'grid_size': int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000,
             'ik_min': float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0,
             'ik_max': float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0,
+            'accelerator': self._selected_accelerator(),
             # Always use the parameters shown in the table as the starting
             # guess for both step and full fits (do not autoscale p0 here).
             'autoscale': False,
             'kernel': self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel',
         }
+
+        try:
+            self.accel_indicator.setText(f"Accelerator: {self._effective_accelerator_label(integrator_opts.get('integrator', 'grid'))}")
+        except Exception:
+            pass
 
         # For step-mode fits, disable autoscaling so successive short fits
         # start from the most-recent parameter values (don't reinitialize p0).
@@ -780,7 +937,7 @@ class MainWindow(QMainWindow):
 
         self.progress.setVisible(True)
         try:
-            self.fit_status.setPlainText('Running')
+            self.fit_status.setPlainText(f"Running ({self._effective_accelerator_label(integrator_opts.get('integrator', 'grid'))})")
         except Exception:
             pass
         self.fit_thread.start()
@@ -833,56 +990,73 @@ class MainWindow(QMainWindow):
         msg = out.get('message', '')
         nfev = out.get('nfev', None)
         r2 = out.get('r2', None)
+        accel_used = out.get('accelerator_used', self._effective_accelerator_label()) if isinstance(out, dict) else self._effective_accelerator_label()
+        try:
+            self.accel_indicator.setText(f'Accelerator: {accel_used}')
+        except Exception:
+            pass
         try:
             r2s = ('R2=' + ('{:.4g}'.format(float(r2)) if r2 is not None else 'nan'))
         except Exception:
             r2s = 'R2=nan'
         try:
             if converged:
-                self.fit_status.setPlainText(f'Converged (nfev={nfev}, {r2s})')
+                self.fit_status.setPlainText(f'Converged [{accel_used}] (nfev={nfev}, {r2s})')
             else:
-                self.fit_status.setPlainText(f'Not converged: {msg} (nfev={nfev}, {r2s})')
+                self.fit_status.setPlainText(f'Not converged [{accel_used}]: {msg} (nfev={nfev}, {r2s})')
         except Exception:
             pass
-        # Best-effort sensitivity check: flag free parameters that hardly change
         try:
-            free_names, _, _ = _build_free_params(self.param_config)
-            current_params = {}
-            for name in self.param_config:
-                if name in fitted:
-                    current_params[name] = float(fitted[name])
-                else:
-                    current_params[name] = float(self.param_config[name].get('value', 0.0))
-            insensitive = []
-            y_arr = np.asarray(self.y)
-            y_range = float(np.max(y_arr) - np.min(y_arr)) if y_arr.size else 0.0
-            sens_threshold = max(1e-8, 1e-6 * (y_range if y_range > 0 else float(np.std(y_arr))))
-            test_grid = min(200, int(self.preview_spin.value())) if hasattr(self, 'preview_spin') else 100
-            kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
-            for name in free_names:
-                pval = float(current_params.get(name, 0.0))
-                dp = abs(pval * 0.01) if abs(pval) > 0 else 1e-6
-                p_plus = dict(current_params)
-                p_minus = dict(current_params)
-                p_plus[name] = pval + dp
-                p_minus[name] = pval - dp
-                try:
-                    y_plus = compute_model(self.iw, p_plus, integrator='grid', grid_size=test_grid, kernel=kern)
-                    y_minus = compute_model(self.iw, p_minus, integrator='grid', grid_size=test_grid, kernel=kern)
-                except Exception:
-                    y_plus = compute_model(self.iw, p_plus, kernel=kern)
-                    y_minus = compute_model(self.iw, p_minus, kernel=kern)
-                rms_change = float(np.sqrt(np.mean((np.asarray(y_plus) - np.asarray(y_minus)) ** 2)))
-                if rms_change < sens_threshold:
-                    insensitive.append(name)
-            if insensitive:
-                try:
-                    old = self.fit_status.toPlainText()
-                    self.fit_status.setPlainText(old + ' — Insensitive: ' + ','.join(insensitive))
-                except Exception:
-                    pass
+            run_postfit_diagnostics = bool(self.postfit_diag_cb.isChecked()) if hasattr(self, 'postfit_diag_cb') else False
         except Exception:
-            pass
+            run_postfit_diagnostics = False
+        if not run_postfit_diagnostics:
+            try:
+                old = self.fit_status.toPlainText()
+                self.fit_status.setPlainText(old + ' — diagnostics: off')
+            except Exception:
+                pass
+        # Best-effort sensitivity check: flag free parameters that hardly change
+        if run_postfit_diagnostics:
+            try:
+                free_names, _, _ = _build_free_params(self.param_config)
+                current_params = {}
+                for name in self.param_config:
+                    if name in fitted:
+                        current_params[name] = float(fitted[name])
+                    else:
+                        current_params[name] = float(self.param_config[name].get('value', 0.0))
+                insensitive = []
+                y_arr = np.asarray(self.y)
+                y_range = float(np.max(y_arr) - np.min(y_arr)) if y_arr.size else 0.0
+                sens_threshold = max(1e-8, 1e-6 * (y_range if y_range > 0 else float(np.std(y_arr))))
+                test_grid = min(200, int(self.preview_spin.value())) if hasattr(self, 'preview_spin') else 100
+                kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+                for name in free_names:
+                    pval = float(current_params.get(name, 0.0))
+                    dp = abs(pval * 0.01) if abs(pval) > 0 else 1e-6
+                    p_plus = dict(current_params)
+                    p_minus = dict(current_params)
+                    p_plus[name] = pval + dp
+                    p_minus[name] = pval - dp
+                    accel = self._selected_accelerator()
+                    try:
+                        y_plus = compute_model(self.iw, p_plus, integrator='grid', grid_size=test_grid, kernel=kern, accelerator=accel)
+                        y_minus = compute_model(self.iw, p_minus, integrator='grid', grid_size=test_grid, kernel=kern, accelerator=accel)
+                    except Exception:
+                        y_plus = compute_model(self.iw, p_plus, kernel=kern, accelerator=accel)
+                        y_minus = compute_model(self.iw, p_minus, kernel=kern, accelerator=accel)
+                    rms_change = float(np.sqrt(np.mean((np.asarray(y_plus) - np.asarray(y_minus)) ** 2)))
+                    if rms_change < sens_threshold:
+                        insensitive.append(name)
+                if insensitive:
+                    try:
+                        old = self.fit_status.toPlainText()
+                        self.fit_status.setPlainText(old + ' — Insensitive: ' + ','.join(insensitive))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         # Compute parameter correlations (if covariance available) and report high correlations.
         # If a covariance matrix is not available from the backend, compute a
         # finite-difference Jacobian estimate here so correlations update for
@@ -907,7 +1081,7 @@ class MainWindow(QMainWindow):
                     pcov = None
 
         # If we still don't have pcov, compute a finite-difference estimate
-        if pcov is None:
+        if pcov is None and run_postfit_diagnostics:
             try:
                 fnames = free_names
                 nfree = len(fnames)
@@ -918,6 +1092,7 @@ class MainWindow(QMainWindow):
                     eps = 1e-6
                     fd_grid = int(min(200, int(self.preview_spin.value()))) if hasattr(self, 'preview_spin') else 100
                     kern = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else 'PCM_Fano_Bessel'
+                    accel = self._selected_accelerator()
                     for j in range(nfree):
                         pj = pvec[j]
                         dp = eps * max(1.0, abs(pj))
@@ -929,19 +1104,19 @@ class MainWindow(QMainWindow):
                         params_plus = _params_from_vector(fnames, p_plus, self.param_config)
                         params_minus = _params_from_vector(fnames, p_minus, self.param_config)
                         try:
-                            y_plus = compute_model(self.iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=kern)
-                            y_minus = compute_model(self.iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=kern)
+                            y_plus = compute_model(self.iw, params_plus, integrator='grid', grid_size=fd_grid, kernel=kern, accelerator=accel)
+                            y_minus = compute_model(self.iw, params_minus, integrator='grid', grid_size=fd_grid, kernel=kern, accelerator=accel)
                         except Exception:
-                            y_plus = compute_model(self.iw, params_plus, kernel=kern)
-                            y_minus = compute_model(self.iw, params_minus, kernel=kern)
+                            y_plus = compute_model(self.iw, params_plus, kernel=kern, accelerator=accel)
+                            y_minus = compute_model(self.iw, params_minus, kernel=kern, accelerator=accel)
                         deriv = (np.asarray(y_plus) - np.asarray(y_minus)) / (2.0 * dp)
                         Jfd[:, j] = deriv
                     JTJ = Jfd.T.dot(Jfd)
                     params_base = _params_from_vector(fnames, pvec, self.param_config)
                     try:
-                        y_base = compute_model(self.iw, params_base, integrator='grid', grid_size=fd_grid, kernel=kern)
+                        y_base = compute_model(self.iw, params_base, integrator='grid', grid_size=fd_grid, kernel=kern, accelerator=accel)
                     except Exception:
-                        y_base = compute_model(self.iw, params_base, kernel=kern)
+                        y_base = compute_model(self.iw, params_base, kernel=kern, accelerator=accel)
                     resid_vec = np.asarray(self.y) - np.asarray(y_base)
                     dof = max(1, ndata - nfree)
                     s2 = float(np.sum(resid_vec ** 2) / dof) if dof > 0 else float(np.sum(resid_vec ** 2))
@@ -1010,6 +1185,13 @@ class MainWindow(QMainWindow):
                                     self.table.item(r, 6).setText('—')
                     except Exception:
                         pass
+            except Exception:
+                pass
+        else:
+            try:
+                for r in range(self.table.rowCount()):
+                    if self.table.item(r, 6) is not None:
+                        self.table.item(r, 6).setText('—')
             except Exception:
                 pass
         # Update param table with fitted values and stds
@@ -1101,8 +1283,12 @@ class MainWindow(QMainWindow):
             grid_sz = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
             integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
             try:
-                y_model_full = compute_model(self.iw, fitted_for_plot, integrator=integrator, grid_size=grid_sz, ik_min=float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0, ik_max=float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0, kernel=kern)
-                self.last_y_model = np.asarray(y_model_full)
+                y_backend = out.get('y_model') if isinstance(out, dict) else None
+                if y_backend is not None and np.asarray(y_backend).size == np.asarray(self.iw).size:
+                    self.last_y_model = np.asarray(y_backend)
+                else:
+                    y_model_full = compute_model(self.iw, fitted_for_plot, integrator=integrator, grid_size=grid_sz, ik_min=float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0, ik_max=float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0, kernel=kern, accelerator=self._selected_accelerator())
+                    self.last_y_model = np.asarray(y_model_full)
             except Exception:
                 # fallback to backend-provided y_model if full recompute fails
                 y_model = out.get('y_model')
@@ -1156,15 +1342,28 @@ class MainWindow(QMainWindow):
         if self.iw is None or self.y is None:
             return
         main_fig = go.Figure()
-        x_data = list(map(float, np.asarray(self.iw)))
-        y_data = list(map(float, np.asarray(self.y)))
+        try:
+            x_full = np.asarray(self.iw, dtype=float)
+            y_full = np.asarray(self.y, dtype=float)
+        except Exception:
+            x_full = np.asarray(self.iw)
+            y_full = np.asarray(self.y)
+        plot_idx = None
+        if x_full.size > 6000:
+            plot_idx = np.linspace(0, x_full.size - 1, 6000, dtype=int)
+            x_plot_arr = x_full[plot_idx]
+            y_plot_arr = y_full[plot_idx]
+        else:
+            x_plot_arr = x_full
+            y_plot_arr = y_full
+        x_data = list(map(float, x_plot_arr))
+        y_data = list(map(float, y_plot_arr))
         # Highlight points that hit dataset min or max with a faint red square
         try:
-            y_arr = np.asarray(self.y, dtype=float)
-            y_min = float(np.min(y_arr))
-            y_max = float(np.max(y_arr))
-            colors = ['rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_arr]
-            symbols = ['square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_arr]
+            y_min = float(np.min(y_full))
+            y_max = float(np.max(y_full))
+            colors = ['rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_plot_arr]
+            symbols = ['square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_plot_arr]
             main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6, color=colors, symbol=symbols)))
         except Exception:
             main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6)))
@@ -1183,7 +1382,7 @@ class MainWindow(QMainWindow):
                 integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
                 ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
                 ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                base_comp, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
+                base_comp, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None), accelerator=self._selected_accelerator())
                 base_arr = np.asarray(base_comp, dtype=float)
                 gauss_total_arr = np.asarray(gauss_total, dtype=float)
                 lorentz_total_arr = np.asarray(lorentz_total, dtype=float)
@@ -1193,15 +1392,22 @@ class MainWindow(QMainWindow):
                     sum_arr = sum_arr + gauss_total_arr
                 if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked():
                     sum_arr = sum_arr + lorentz_total_arr
+                if plot_idx is not None:
+                    base_plot = base_arr[plot_idx]
+                    sum_plot = sum_arr[plot_idx]
+                else:
+                    base_plot = base_arr
+                    sum_plot = sum_arr
                 # Integral / PCM component
-                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, base_arr)), mode='lines', name='integral component', line=dict(width=2, dash='dash')))
+                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, base_plot)), mode='lines', name='integral component', line=dict(width=2, dash='dash')))
                 # Plot gaussian components only when enabled and non-zero
                 if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and gauss_components is not None:
                     for j, comp in enumerate(gauss_components):
                         try:
                             arr = np.asarray(comp, dtype=float)
                             if np.any(np.abs(arr) > 1e-12):
-                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr)), mode='lines', name=f'gaussian {j+1}', line=dict(width=2, dash='dot')))
+                                arr_plot = arr[plot_idx] if plot_idx is not None else arr
+                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr_plot)), mode='lines', name=f'gaussian {j+1}', line=dict(width=2, dash='dot')))
                         except Exception:
                             pass
                 # Plot lorentzian components only when enabled and non-zero
@@ -1210,16 +1416,20 @@ class MainWindow(QMainWindow):
                         try:
                             arr = np.asarray(comp, dtype=float)
                             if np.any(np.abs(arr) > 1e-12):
-                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr)), mode='lines', name=f'lorentzian {j+1}', line=dict(width=2, dash='dot')))
+                                arr_plot = arr[plot_idx] if plot_idx is not None else arr
+                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr_plot)), mode='lines', name=f'lorentzian {j+1}', line=dict(width=2, dash='dot')))
                         except Exception:
                             pass
-                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, sum_arr)), mode='lines', name='fit', line=dict(width=3)))
+                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, sum_plot)), mode='lines', name='fit', line=dict(width=3)))
                 plotted_model = True
             except Exception:
                 plotted_model = False
         if not plotted_model and y_model is not None:
             try:
-                y_model_list = list(map(float, np.asarray(y_model)))
+                y_model_arr = np.asarray(y_model)
+                if plot_idx is not None and y_model_arr.size == np.asarray(self.iw).size:
+                    y_model_arr = y_model_arr[plot_idx]
+                y_model_list = list(map(float, y_model_arr))
                 main_fig.add_trace(go.Scatter(x=x_data, y=y_model_list, mode='lines', name='fit', line=dict(width=2)))
             except Exception:
                 pass
@@ -1296,7 +1506,7 @@ class MainWindow(QMainWindow):
                         integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
                         ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
                         ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                        y_full_try = compute_model(self.iw, params_try, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None))
+                        y_full_try = compute_model(self.iw, params_try, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None), accelerator=self._selected_accelerator())
                         if np.asarray(y_full_try).size == x_arr.size:
                             y_model_arr = np.asarray(y_full_try, dtype=float)
                     except Exception:
@@ -1304,8 +1514,12 @@ class MainWindow(QMainWindow):
 
             if y_model_arr is not None:
                 resid_arr = y_arr - y_model_arr
-                res_x = list(map(float, x_arr))
-                res_y = list(map(float, resid_arr))
+                if plot_idx is not None and resid_arr.size == x_arr.size:
+                    res_x = list(map(float, x_arr[plot_idx]))
+                    res_y = list(map(float, resid_arr[plot_idx]))
+                else:
+                    res_x = list(map(float, x_arr))
+                    res_y = list(map(float, resid_arr))
                 if len(res_x) > 0:
                     res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
             else:
@@ -1397,38 +1611,15 @@ class MainWindow(QMainWindow):
         # Math block (empty - no message shown in preview)
         math_block = ''
 
-        # Compose final HTML: inline local plotly if available (avoids race 'Plotly is not defined')
-        plotly_head = None
-        katex_css = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css'
-        katex_js = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js'
-        katex_autorender = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js'
-        base = QUrl('')
-        if self.assets_dir:
-            local_plotly = os.path.join(self.assets_dir, 'plotly.min.js')
-            if os.path.isfile(local_plotly):
-                try:
-                    with open(local_plotly, 'r', encoding='utf-8') as f:
-                        plotly_js = f.read()
-                    plotly_head = f"<script type=\"text/javascript\">{plotly_js}</script>"
-                    katex_css = 'katex.min.css'
-                    katex_js = 'katex.min.js'
-                    katex_autorender = 'auto-render.min.js'
-                    base = QUrl.fromLocalFile(os.path.abspath(self.assets_dir) + os.sep)
-                except Exception:
-                    plotly_head = None
-
-        if plotly_head is None:
-            plotly_head = '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>'
+        # Compose final HTML with an inline/offline Plotly script (no CDN dependency).
+        plotly_head, base = self._build_plotly_head()
 
         html = f"""<!doctype html>
 <html>
     <head>
         <meta charset="utf-8">
         <title>PeakFit Preview</title>
-        <link rel="stylesheet" href="{katex_css}">
         {plotly_head}
-        <script defer src="{katex_js}"></script>
-        <script defer src="{katex_autorender}"></script>
         <style> body {{ font-family: Arial, sans-serif; margin:10px; }} table {{ width:100%; border-collapse:collapse; }} td, th {{ border:1px solid #ddd; padding:6px; }}</style>
     </head>
     <body>
@@ -1551,7 +1742,7 @@ class MainWindow(QMainWindow):
 
             if params_plot is not None:
                 try:
-                    base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
+                    base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name, accelerator=self._selected_accelerator())
                     if np.asarray(base_full).size == x_arr.size and np.asarray(gauss_total_full).size == x_arr.size and np.asarray(lorentz_total_full).size == x_arr.size:
                         y_fit = (np.asarray(base_full) + np.asarray(gauss_total_full) + np.asarray(lorentz_total_full))[mask]
                 except Exception:
@@ -1574,11 +1765,11 @@ class MainWindow(QMainWindow):
             if y_fit is None:
                 try:
                     params = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
-                    y_full = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
+                    y_full = compute_model(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name, accelerator=self._selected_accelerator())
                     y_fit = np.asarray(y_full, dtype=float)[mask]
                     # try to compute components as well
                     try:
-                        base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name)
+                        base_full, gauss_total_full, gauss_components_full, lorentz_total_full, lorentz_components_full = model_components(self.iw, params, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel_name, accelerator=self._selected_accelerator())
                     except Exception:
                         base_full = None
                         gauss_total_full = None
@@ -1873,7 +2064,7 @@ class MainWindow(QMainWindow):
             ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
             try:
                 if params_plot is not None:
-                    y_full = compute_model(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel)
+                    y_full = compute_model(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel, accelerator=self._selected_accelerator())
             except Exception:
                 y_full = None
 
@@ -1889,7 +2080,7 @@ class MainWindow(QMainWindow):
             plot_fit(iw_sel, y_sel, y_model_sel,
                      params=params_plot, param_errs=errs, r2=r2,
                      output_html=path, show=False, converged=converged, convergence_message=msg,
-                     assets_dir=self.assets_dir, kernel=kernel)
+                     assets_dir=self.assets_dir, kernel=kernel, accelerator=self._selected_accelerator())
             QtWidgets.QMessageBox.information(self, 'Exported', f'HTML report saved to {path}')
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, 'Error', f'Failed to export HTML: {e}')
@@ -2358,6 +2549,10 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    try:
+        QLocale.setDefault(QLocale.c())
+    except Exception:
+        pass
     app = QApplication([])
     win = MainWindow()
     win.show()
