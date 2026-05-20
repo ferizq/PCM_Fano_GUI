@@ -14,17 +14,20 @@ from typing import Optional
 import os
 import numpy as np
 import plotly.graph_objects as go
+from .model import model_components
 
 
 def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: float = None,
              output_html: str = "fit_plot.html", show: bool = True,
              converged: Optional[bool] = None, convergence_message: Optional[str] = None,
-             assets_dir: Optional[str] = None, kernel: Optional[str] = None):
+             assets_dir: Optional[str] = None, kernel: Optional[str] = None,
+             x_range: Optional[tuple] = None, accelerator: Optional[str] = 'auto'):
     """Create an HTML output with plots on the left and the math definition on the right.
 
     If `assets_dir` is provided and exists, the generated HTML will reference
-    `plotly.min.js`, `katex.min.css`, `katex.min.js` and `auto-render.min.js` from
-    that folder using relative paths. Otherwise CDN links will be used.
+    local `plotly.min.js` and KaTeX files from that folder using relative paths.
+    Without local assets, Plotly is embedded inline and KaTeX rendering is skipped,
+    so the HTML remains fully offline.
     """
     iw = np.asarray(iw)
     y = np.asarray(y)
@@ -45,28 +48,110 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         # Use HTML superscript for R^2 in the table
         param_rows.append(("R<sup>2</sup>", f"{r2:.6g}", ""))
 
-    # Main figure: data + fit (fixed height)
+    # Main figure: data + fit (fixed height). If `params` contains an
+    # additive Gaussian component compute and plot components separately
     fig_main = go.Figure()
-    fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6)))
-    fig_main.add_trace(go.Scatter(x=iw, y=y_model, mode='lines', name='fit', line=dict(width=2)))
-    fig_main.update_layout(title='Data and Fit', margin=dict(l=40, r=10, t=40, b=40), height=520)
+    # Highlight points that hit the dataset min or max with a faint red square
+    try:
+      y_arr = np.asarray(y, dtype=float)
+      y_min = float(np.min(y_arr))
+      y_max = float(np.max(y_arr))
+      colors = [ 'rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_arr ]
+      symbols = [ 'square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_arr ]
+      fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6, color=colors, symbol=symbols)))
+    except Exception:
+      fig_main.add_trace(go.Scatter(x=iw, y=y, mode='markers', name='data', marker=dict(size=6)))
+
+    # Attempt to compute model components (base integral and gaussian)
+    base = None
+    gauss_total = None
+    y_model_calc = None
+    gauss_components = None
+    if params is not None:
+      try:
+        base, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(iw, params, integrator='grid', grid_size=4000, ik_min=0.0, ik_max=1.0, kernel=kernel, accelerator=accelerator)
+        y_model_calc = np.asarray(base) + np.asarray(gauss_total) + np.asarray(lorentz_total)
+      except Exception:
+        base = None
+        gauss_total = None
+        y_model_calc = None
+        gauss_components = None
+        lorentz_components = None
+
+    if y_model_calc is not None:
+      # If we have separate components, show them as distinct traces
+      try:
+        has_components = False
+        if gauss_components is not None and any(np.any(np.asarray(c) != 0.0) for c in gauss_components):
+            has_components = True
+        if lorentz_components is not None and any(np.any(np.asarray(c) != 0.0) for c in lorentz_components):
+            has_components = True
+      except Exception:
+        has_components = False
+      # Integral / PCM component
+      fig_main.add_trace(go.Scatter(x=iw, y=base, mode='lines', name='integral component', line=dict(width=2, dash='dash')))
+      # Plot each gaussian component individually (if any non-zero)
+      if gauss_components is not None:
+        for j, comp in enumerate(gauss_components):
+          try:
+            arr = np.asarray(comp)
+            if np.any(np.abs(arr) > 1e-12):
+                fig_main.add_trace(go.Scatter(x=iw, y=arr, mode='lines', name=f'gaussian {j+1}', line=dict(width=1, dash='dot')))
+          except Exception:
+            pass
+      # Plot each lorentzian component individually (if any non-zero)
+      if lorentz_components is not None:
+        for j, comp in enumerate(lorentz_components):
+          try:
+            arr = np.asarray(comp)
+            if np.any(np.abs(arr) > 1e-12):
+                fig_main.add_trace(go.Scatter(x=iw, y=arr, mode='lines', name=f'lorentzian {j+1}', line=dict(width=1, dash='dot')))
+          except Exception:
+            pass
+      # Sum (fit)
+      fig_main.add_trace(go.Scatter(x=iw, y=y_model_calc, mode='lines', name='fit', line=dict(width=3)))
+    else:
+      # fallback: plot provided model array
+      fig_main.add_trace(go.Scatter(x=iw, y=y_model, mode='lines', name='fit', line=dict(width=2)))
+    fig_main.update_layout(
+      title='Data and Fit',
+      margin=dict(l=40, r=10, t=80, b=40),
+      height=520,
+      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
 
     # Residuals figure (fixed height)
     fig_resid = go.Figure()
     fig_resid.add_trace(go.Scatter(x=iw, y=residuals, mode='markers', name='residuals', marker=dict(size=4)))
     fig_resid.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240)
 
-    # Convert figures to HTML fragments. If local assets are available we will
-    # reference them; otherwise embed Plotly into the main fragment so the
-    # exported HTML is self-contained and shows plots offline.
-    use_local_plotly = assets_dir is not None and os.path.isdir(assets_dir) and os.path.isfile(os.path.join(assets_dir, 'plotly.min.js'))
-    if use_local_plotly:
-      main_div = fig_main.to_html(full_html=False, include_plotlyjs=False)
-      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
-    else:
-      # embed plotly JS into the main fragment to avoid external CDN dependency
-      main_div = fig_main.to_html(full_html=False, include_plotlyjs=True)
-      resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False)
+    # If the caller provided an explicit x_range use it for both main and residuals
+    if x_range is not None:
+      try:
+        lo, hi = x_range
+        fig_main.update_xaxes(range=[float(lo), float(hi)])
+        fig_resid.update_xaxes(range=[float(lo), float(hi)])
+        # Autoscale residuals y-axis based on residuals inside the x_range
+        try:
+          mask = (np.asarray(iw) >= float(lo)) & (np.asarray(iw) <= float(hi))
+          if np.any(mask):
+            resid_mask = residuals[mask]
+            ymin = float(np.min(resid_mask))
+            ymax = float(np.max(resid_mask))
+            if ymin == ymax:
+              ymin -= 1e-6
+              ymax += 1e-6
+            pad = max(1e-6, 0.05 * (ymax - ymin))
+            fig_resid.update_yaxes(range=[ymin - pad, ymax + pad])
+        except Exception:
+          pass
+      except Exception:
+        pass
+
+    # Export reports as fully self-contained HTML for offline portability.
+    # Plotly is embedded directly in the main figure fragment.
+    main_div = fig_main.to_html(full_html=False, include_plotlyjs=True, include_mathjax=False)
+    resid_div = fig_resid.to_html(full_html=False, include_plotlyjs=False, include_mathjax=False)
 
     # Build HTML parameter table (regular HTML so markup like <sup> works and text is selectable)
     table_html_lines = [
@@ -118,23 +203,27 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
         msg = _html_escape(convergence_message or '')
         status_html = f"<div id=\"fit-status\" style=\"padding:8px;border-radius:6px;background:#ffecec;color:#8b0000;margin-bottom:8px;font-weight:600;\">Fit failed: {msg}</div>"
 
-    # Determine asset URLs (either local relative paths or CDN links)
-    plotly_src = 'https://cdn.plot.ly/plotly-latest.min.js'
-    katex_css = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css'
-    katex_js = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js'
-    katex_autorender = 'https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js'
-    # Only use local assets when the expected JS file exists in the assets dir.
-    if use_local_plotly:
-        out_dir = os.path.abspath(os.path.dirname(output_html) or '.')
-        try:
-            rel = os.path.relpath(os.path.abspath(assets_dir), out_dir)
-        except Exception:
-            rel = os.path.abspath(assets_dir)
-        rel = rel.replace('\\', '/')
-        plotly_src = f"{rel}/plotly.min.js"
-        katex_css = f"{rel}/katex.min.css"
-        katex_js = f"{rel}/katex.min.js"
-        katex_autorender = f"{rel}/auto-render.min.js"
+    # Inline KaTeX only when local assets are available.
+    katex_head = ''
+    if assets_dir is not None and os.path.isdir(assets_dir):
+      katex_css = os.path.join(os.path.abspath(assets_dir), 'katex.min.css')
+      katex_js = os.path.join(os.path.abspath(assets_dir), 'katex.min.js')
+      katex_autorender = os.path.join(os.path.abspath(assets_dir), 'auto-render.min.js')
+      try:
+        if os.path.isfile(katex_css) and os.path.isfile(katex_js) and os.path.isfile(katex_autorender):
+          with open(katex_css, 'r', encoding='utf-8') as f:
+            css_txt = f.read()
+          with open(katex_js, 'r', encoding='utf-8') as f:
+            js_txt = f.read().replace('</script>', '<\\/script>')
+          with open(katex_autorender, 'r', encoding='utf-8') as f:
+            autorender_txt = f.read().replace('</script>', '<\\/script>')
+          katex_head = (
+            f'<style>{css_txt}</style>\n'
+            f'<script type="text/javascript">{js_txt}</script>\n'
+            f'<script type="text/javascript">{autorender_txt}</script>'
+          )
+      except Exception:
+        katex_head = ''
 
     # Compose final HTML using a CSS grid (2 rows x 3 columns) with fixed plot sizes
     html_template = """<!doctype html>
@@ -142,10 +231,7 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
   <head>
     <meta charset="utf-8">
     <title>Peak fit</title>
-    <link rel="stylesheet" href="%%KATEX_CSS%%">
-    %%PLOTLY_HEAD%%
-    <script defer src="%%KATEX_JS%%"></script>
-    <script defer src="%%KATEX_AUTORENDER%%"></script>
+    %%KATEX_HEAD%%
     <style>
       body { font-family: Arial, sans-serif; margin: 10px; }
       .status { grid-column: 1 / span 3; }
@@ -183,34 +269,50 @@ def plot_fit(iw, y, y_model, params: dict = None, param_errs: dict = None, r2: f
   </body>
 </html>"""
 
-    # Decide what to place in the header for Plotly (either a script tag
-    # referencing a local file / CDN, or empty when Plotly is already
-    # embedded into `main_div`).
-    if use_local_plotly:
-      plotly_head = f"<script src=\"{plotly_src}\"></script>"
-    else:
-      # main_div already embeds Plotly when local assets are not available
-      plotly_head = ''
-
     html = (html_template
         .replace('%%MAIN_DIV%%', main_div)
         .replace('%%RESID_DIV%%', resid_div)
         .replace('%%TABLE_HTML%%', table_html)
         .replace('%%MATH_BLOCK%%', math_block)
         .replace('%%STATUS_HTML%%', status_html)
-        .replace('%%PLOTLY_HEAD%%', plotly_head)
-        .replace('%%KATEX_CSS%%', katex_css)
-        .replace('%%KATEX_JS%%', katex_js)
-        .replace('%%KATEX_AUTORENDER%%', katex_autorender))
+        .replace('%%KATEX_HEAD%%', katex_head))
+
+    # Inject JS that syncs the main plot x-range to the residuals plot
+    sync_js = '''<script>
+(function(){
+  function setupSync(){
+    var plots = document.getElementsByClassName('plotly-graph-div');
+    if(!plots || plots.length < 2) return;
+    var main = plots[0], resid = plots[1];
+    function handler(eventdata){
+      try{
+        if(eventdata['xaxis.range[0]'] !== undefined && eventdata['xaxis.range[1]'] !== undefined){
+          Plotly.relayout(resid, {'xaxis.range':[eventdata['xaxis.range[0]'], eventdata['xaxis.range[1]']]});
+        } else if(eventdata['xaxis.range']){
+          Plotly.relayout(resid, {'xaxis.range':eventdata['xaxis.range']});
+        } else if(eventdata['xaxis.autorange'] === true){
+          Plotly.relayout(resid, {'xaxis.autorange': true});
+        }
+      }catch(e){}
+    }
+    try{ main.on('plotly_relayout', handler); }catch(e){}
+  }
+  if(document.readyState==='complete'){ setTimeout(setupSync, 100); } else { window.addEventListener('load', function(){ setTimeout(setupSync, 100); }); }
+})();
+</script>'''
+    try:
+        html = html.replace('</body>', sync_js + '\n</body>')
+    except Exception:
+        pass
 
     with open(output_html, 'w', encoding='utf-8') as f:
         f.write(html)
 
     if show:
-        try:
+      try:
             import webbrowser
             webbrowser.open('file://' + os.path.abspath(output_html))
-        except Exception:
+      except Exception:
             pass
 
     # Return the main figure for further programmatic use

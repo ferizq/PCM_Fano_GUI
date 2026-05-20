@@ -8,7 +8,7 @@ Usage (from project root in PowerShell):
 What it does:
 - creates a local virtual environment `.venv` (if missing)
 - installs project requirements and PyInstaller into the venv
-- runs PyInstaller to produce a single-file executable at `dist\peakfit_cli.exe`
+- runs PyInstaller to produce a single-file executable at `dist\peakfit.exe`
 
 The produced executable can be distributed to Windows users without installing Python
 or the project's Python libraries.
@@ -65,14 +65,47 @@ $venvPip = Join-Path $venv 'Scripts\\pip.exe'
 & $venvPip install --upgrade pip
 & $venvPip install -r requirements.txt pyinstaller
 
-# PyInstaller --add-data expects 'SRC;DEST' on Windows. Use absolute path for SRC.
-$cfg = Join-Path $root 'configs\\default_params.json'
-$addData = "$cfg;configs"
+# Fail early if the GUI runtime stack is not importable in the venv.
+& $venvPython -c "import matplotlib; import matplotlib.backends.backend_qtagg; import PySide6; print('GUI deps OK')"
+if ($LASTEXITCODE -ne 0) {
+    throw "Required GUI dependencies are missing in the build venv (matplotlib/PySide6)."
+}
+
+# PyInstaller --add-data expects 'SRC;DEST' on Windows.
+$configsDir = Join-Path $root 'configs'
+$assetsDir = Join-Path $root 'assets'
+$addDataConfigs = "$configsDir;configs"
+$addDataAssets = "$assetsDir;assets"
 
 Write-Host "Running PyInstaller (this may take a minute)..."
 # build a windowed (no-console) executable so it can be double-clicked from Explorer
 # Use the GUI entrypoint `scripts\gui_app.py` and ensure common Qt/WebEngine modules
-& $venvPython -m PyInstaller --onefile --noconsole --name peakfit --add-data $addData --hidden-import lmfit --hidden-import plotly --hidden-import pkg_resources.py2_warn --hidden-import PySide6 --hidden-import PySide6.QtWidgets --hidden-import PySide6.QtGui --hidden-import PySide6.QtCore --hidden-import PySide6.QtWebEngineWidgets --hidden-import PySide6.QtWebEngineCore scripts\gui_app.py
+$args = @(
+    '--onefile',
+    '--noconsole',
+    '--name', 'peakfit',
+    '--add-data', $addDataConfigs,
+    '--collect-data', 'plotly',
+    '--collect-all', 'matplotlib',
+    '--hidden-import', 'matplotlib',
+    '--hidden-import', 'matplotlib.backends.backend_qtagg',
+    '--hidden-import', 'matplotlib.backends.qt_compat',
+    '--hidden-import', 'lmfit',
+    '--hidden-import', 'plotly',
+    '--hidden-import', 'pkg_resources.py2_warn',
+    '--hidden-import', 'PySide6',
+    '--hidden-import', 'PySide6.QtWidgets',
+    '--hidden-import', 'PySide6.QtGui',
+    '--hidden-import', 'PySide6.QtCore',
+    '--hidden-import', 'PySide6.QtWebEngineWidgets',
+    '--hidden-import', 'PySide6.QtWebEngineCore'
+)
+if (Test-Path $assetsDir) {
+    $args += @('--add-data', $addDataAssets)
+}
+$args += 'scripts\gui_app.py'
+
+& $venvPython -m PyInstaller $args
 
 Write-Host "Build finished. Executable: dist\\peakfit.exe"
 

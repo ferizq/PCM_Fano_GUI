@@ -35,6 +35,7 @@ def test_scaling():
     y_b = model(iw, params, integrator='grid', grid_size=2000, kernel='PCM_Fano_Bessel')
     s_obs_b = float(y_b[0] / integral_b[0])
     s_exp_b = 1.0 / ((params['q'] ** 2 + 1.0) * (params['L'] ** 3))
+    rel_err_b = abs(s_obs_b - s_exp_b) / (abs(s_exp_b) + 1e-24)
 
     # Gauss (use same params + alpha if desired)
     params_g = params.copy()
@@ -43,14 +44,12 @@ def test_scaling():
     y_g = model(iw, params_g, integrator='grid', grid_size=2000, kernel='PCM_Fano_Gauss')
     s_obs_g = float(y_g[0] / integral_g[0])
     s_exp_g = (params_g['L'] ** 3) / (params_g['q'] ** 2 + 1.0) * (params_g.get('alpha', 1.0) ** (-4.0 / 3.0))
+    rel_err_g = abs(s_obs_g - s_exp_g) / (abs(s_exp_g) + 1e-24)
 
-    print('Bessel observed scale:', s_obs_b)
-    print('Bessel expected scale:', s_exp_b)
-    print('Bessel rel error:', abs(s_obs_b - s_exp_b) / (abs(s_exp_b) + 1e-24))
-    print('')
-    print('Gauss observed scale:', s_obs_g)
-    print('Gauss expected scale:', s_exp_g)
-    print('Gauss rel error:', abs(s_obs_g - s_exp_g) / (abs(s_exp_g) + 1e-24))
+    assert np.isfinite(rel_err_b)
+    assert np.isfinite(rel_err_g)
+    assert rel_err_b < 5e-3
+    assert rel_err_g < 5e-3
 
 if __name__ == '__main__':
     test_scaling()

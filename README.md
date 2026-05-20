@@ -80,6 +80,21 @@ pip install -r requirements.txt
 python scripts/fit_peak.py path/to/data.txt -c configs/default_params.json -o result.html
 ```
 
+3. Run a quick benchmark for model and fit runtime (medium workload):
+
+```bash
+python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3
+```
+
+Optional: compare accelerator modes explicitly (`auto`, `numpy`, `numba`):
+
+```bash
+python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3 --accelerator auto
+python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3 --accelerator numpy
+```
+
+If `numba` is installed, `--accelerator auto` will use the compiled grid path; otherwise it falls back to numpy automatically.
+
 Data must be a two-column whitespace-separated text file with X (iw) in the first
 column and Y in the second column.
 
@@ -120,11 +135,11 @@ PowerShell (from repo root, with venv active):
 .\.venv\Scripts\python.exe -m scripts.gui_app
 ```
 
-If you want the GUI to run fully offline (no CDN), place local copies of the following files into the `assets/` folder at the repo root:
-- `plotly.min.js`
-- `katex.min.css`
-- `katex.min.js`
-- `auto-render.min.js`
+The GUI preview now uses an embedded matplotlib canvas with a native toolbar
+(zoom/pan/home) for data+fit and residual plots.
+
+GUI HTML export is disabled. If you still need HTML reports, use the CLI path
+(`scripts/fit_peak.py`), which keeps Plotly-based HTML output.
 
 Build a folder-based portable GUI distribution with the helper script:
 

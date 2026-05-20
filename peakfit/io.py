@@ -1,12 +1,11 @@
 """Data IO and parameter config loading.
 
-This module provides robust, locale-independent numeric parsing helpers
-so the GUI and single-file executable behave the same regardless of the
-host system locale. In particular we normalize decimal separators so
-that a comma is interpreted as a decimal point and common thousands
-separators (spaces, NBSP, apostrophes) are removed.
+Provides locale-independent numeric parsing helpers used by the GUI
+and command-line helpers. Ensures numbers using comma decimals or
+grouping separators are normalized to a dot-decimal form before
+conversion.
 """
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
 import re
 import numpy as np
 import json
@@ -24,112 +23,131 @@ def load_data(path: str) -> Tuple[np.ndarray, np.ndarray]:
     with open(path, 'r', encoding='utf-8') as f:
         raw = f.read()
 
-    # Normalize numeric tokens so the file is parsed the same regardless of
-    # the OS locale. Strategy:
-    # - remove common grouping separators (spaces, NBSP, apostrophes)
-    # - if a token contains both '.' and ',' assume '.' is thousands and
-    #   ',' is the decimal separator (e.g. '1.234,56') -> '1234.56'
-    # - otherwise convert any ',' to '.' (decimal comma -> point)
-    # - if a token contains multiple '.' and no comma, treat dots as
-    #   grouping separators and remove them ('1.234.567' -> '1234567')
-
-    # regex matching numbers with optional grouping separators and decimals
-    num_re = re.compile(r"[-+]? (?:\d{1,3}(?:[\.\s\u00A0'’]\d{3})+|\d+)(?:[\.,]\d+)?(?:[eE][-+]?\d+)?", re.VERBOSE)
+    # Numeric token regexp (matches integers, grouped thousands, decimals, exponents)
+    num_re = re.compile(r"[-+]?(?:\d{1,3}(?:[\.\s\u00A0'’]\d{3})+|\d+)(?:[\.,]\d+)?(?:[eE][-+]?\d+)?")
 
     def _normalize_num_token(tok: str) -> str:
-        t = tok
-        # strip surrounding whitespace
-        t = t.strip()
+        t = str(tok).strip()
         if t == '':
             return t
-        # remove non-digit grouping characters (spaces, NBSP, apostrophes)
+        # remove grouping characters (space, NBSP, apostrophes)
         t = t.replace('\u00A0', '').replace(' ', '').replace("'", '').replace('’', '')
-        # if both dot and comma present, assume dot is thousands and comma decimal
         if '.' in t and ',' in t:
+            # e.g. 1.234,56 -> 1234.56
             t = t.replace('.', '').replace(',', '.')
             return t
-        # convert comma decimal to point
         if ',' in t:
+            # decimal comma -> point
             t = t.replace(',', '.')
-        # if multiple dots remain, decide whether they're grouping or decimal
+        # multiple dots: decide grouping vs decimal heuristically
         if t.count('.') > 1:
             parts = t.split('.')
-            # if the last group has length 3 it's likely a thousands grouping
             if all(p.isdigit() for p in parts):
+                # if final group has 3 digits, treat dots as thousands separators
                 if len(parts[-1]) == 3:
-                    # remove all dots
                     t = ''.join(parts)
                 else:
-                    # treat last as fractional part
+                    # otherwise treat last part as fractional
                     t = ''.join(parts[:-1]) + '.' + parts[-1]
         return t
 
-    processed_lines = []
-    for line in raw.splitlines():
-        if line.strip() == '':
-            processed_lines.append('')
+    # Build (x, y) lists by extracting the first two numeric tokens
+    # on each line. This tolerates files with varying column counts
+    # (extra metadata columns, missing trailing columns, etc.).
+    x_vals = []
+    y_vals = []
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
             continue
-        if '#' in line:
-            code, comment = line.split('#', 1)
-            comment = '#' + comment
-        else:
-            code = line
-            comment = ''
-        # find numeric tokens in the code portion preserving order
-        nums = num_re.findall(code)
-        if not nums:
-            # no numeric tokens found, keep original (but preserve comment)
-            nl = code.strip()
-            if comment:
-                nl = (nl + ' ' + comment) if nl else comment
-            processed_lines.append(nl)
+        # strip inline comments
+        code = line.split('#', 1)[0].strip()
+        if not code:
             continue
-        normed = [_normalize_num_token(n) for n in nums]
-        new_line = ' '.join(normed)
-        if comment:
-            new_line = new_line + ' ' + comment
-        processed_lines.append(new_line)
+        # tokenize on whitespace (tabs/spaces). Avoid splitting on comma
+        # so locale decimal commas remain attached to the numeric token.
+        toks = re.split(r"\s+", code)
+        toks = [t for t in toks if t != '']
+        if not toks:
+            continue
+        # normalize tokens and keep those that contain digits
+        normed = []
+        for t in toks:
+            if re.search(r"\d", t):
+                nt = _normalize_num_token(t)
+                if nt != '':
+                    normed.append(nt)
+        if len(normed) < 2:
+            # not enough numeric tokens on this line, skip
+            continue
+        try:
+            xv = float(normed[0])
+            yv = float(normed[1])
+        except Exception:
+            # skip lines that still fail to convert
+            continue
+        x_vals.append(xv)
+        y_vals.append(yv)
 
-    processed = '\n'.join(processed_lines)
+    if not x_vals:
+        raise ValueError(f"No numeric (x y) data could be parsed from {path!r}")
 
-    data = np.loadtxt(StringIO(processed))
-    if data.ndim == 1:
-        if data.size < 2:
-            raise ValueError("Data file must contain at least two numbers per row")
-        x = np.array([data[0]])
-        y = np.array([data[1]])
-    else:
-        x = data[:, 0]
-        y = data[:, 1]
-    return x.astype(float), y.astype(float)
+    x = np.array(x_vals, dtype=float)
+    y = np.array(y_vals, dtype=float)
+    return x, y
 
 
 def load_param_config(path: str) -> Dict[str, Dict]:
     with open(path, "r", encoding='utf-8') as f:
         cfg = json.load(f)
 
-    # Canonicalize legacy parameter names that start with a leading 'i'.
-    # If the JSON contains both the legacy key (e.g. 'iC') and the canonical
-    # key (e.g. 'C'), prefer the canonical key and ignore the legacy one.
-    out = {}
-    keys = set(cfg.keys())
+    # Normalize keys and numeric subfields for locale independence.
+    # Strategy:
+    # - canonical name: strip leading 'i' if present, then remove underscores
+    # - if the canonical form is present explicitly in the JSON, prefer it
+    # - normalize string numeric fields for 'value', 'min', 'max'
+    def _normalize_value_field(v):
+        try:
+            if isinstance(v, str):
+                ns = normalize_number_string(v)
+                try:
+                    return float(ns)
+                except Exception:
+                    return v
+            return v
+        except Exception:
+            return v
+
+    processed = {}
+    cfg_keys = set(cfg.keys())
     for k, v in cfg.items():
+        # derive canonical key name
         if isinstance(k, str) and k.startswith('i') and len(k) > 1:
-            nk = k[1:]
-            if nk in keys:
-                # canonical key present; skip legacy key
-                continue
-            out[nk] = v
+            base = k[1:]
         else:
-            out[k] = v
-    return out
+            base = k
+        canonical = base.replace('_', '')
+        # prefer an explicitly provided canonical key in the JSON
+        if canonical in cfg_keys and canonical != k:
+            continue
+        # normalize numeric string fields inside the parameter dict
+        if isinstance(v, dict):
+            new_v = {}
+            for fk, fv in v.items():
+                if fk in ('value', 'min', 'max'):
+                    new_v[fk] = _normalize_value_field(fv)
+                else:
+                    new_v[fk] = fv
+            processed[canonical] = new_v
+        else:
+            processed[canonical] = v
+    return processed
 
 
-def normalize_number_string(s: str) -> str:
+def normalize_number_string(s: Any) -> str:
     """Return a locale-independent numeric string using '.' as decimal separator.
 
-    This is useful when reading user-entered values from the GUI (which may
-    use comma as decimal separator on some systems) before casting to float.
+    Accepts inputs like '1.234,56', "1 234,56", "1'234,56" and returns
+    a string with a dot decimal (e.g. '1234.56').
     """
     if s is None:
         return ''
