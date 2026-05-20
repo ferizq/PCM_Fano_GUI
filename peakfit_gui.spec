@@ -2,15 +2,15 @@
 
 from PyInstaller.utils.hooks import collect_data_files
 
-plotly_datas = collect_data_files('plotly')
+matplotlib_datas = collect_data_files('matplotlib')
 
 
 a = Analysis(
     ['scripts\\gui_app.py'],
     pathex=['.'],
     binaries=[],
-    datas=plotly_datas + [('configs', 'configs'), ('assets', 'assets')],
-    hiddenimports=['lmfit', 'plotly', 'PySide6', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore'],
+    datas=matplotlib_datas + [('configs', 'configs'), ('assets', 'assets')],
+    hiddenimports=['lmfit', 'matplotlib', 'matplotlib.backends.backend_qtagg', 'PySide6', 'PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtCore'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

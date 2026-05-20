@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('configs', 'configs'), ('assets', 'assets')]
+datas = [('C:\\Users\\admin\\Downloads\\PCM_Fano_GUI\\configs', 'configs'), ('C:\\Users\\admin\\Downloads\\PCM_Fano_GUI\\assets', 'assets')]
 datas += collect_data_files('plotly')
 
 

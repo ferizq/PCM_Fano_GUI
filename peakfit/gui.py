@@ -1,36 +1,38 @@
 """Minimal PySide6 GUI scaffold for interactive peak fitting.
 
-This module provides a basic desktop UI using PySide6 with a QWebEngineView
-to render Plotly-based plots (data+fit and residuals), a parameter table,
+This module provides a basic desktop UI using PySide6 with an embedded
+matplotlib canvas to render data+fit and residuals, a parameter table,
 and buttons to load/save files and run/cancel fits.
 
 This is an initial scaffold that reuses `peakfit.io` and `peakfit.fitting`.
-Ensure `PySide6` and `PySide6-QtWebEngine` are installed before running.
+Ensure `PySide6` and `matplotlib` are installed before running.
 """
 from __future__ import annotations
 
 import json
 import os
-import tempfile
 from typing import Dict, Any
 
 import numpy as np
-import plotly.graph_objects as go
 import copy
 
 try:
     from PySide6 import QtCore, QtWidgets
-    from PySide6.QtCore import QUrl, QLocale
+    from PySide6.QtCore import QLocale
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                    QHBoxLayout, QPushButton, QFileDialog, QTableWidget,
                                    QTableWidgetItem, QCheckBox, QProgressBar, QLabel,
                                    QHeaderView, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox,
                                    QPlainTextEdit)
     from PySide6.QtGui import QDoubleValidator
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
 except Exception as e:
-    raise ImportError("PySide6 and QtWebEngine are required to run the GUI: " + str(e))
+    raise ImportError("PySide6 is required to run the GUI: " + str(e))
+
+try:
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT as NavigationToolbar
+except Exception as e:
+    raise ImportError("matplotlib (Qt backend) is required to run the GUI: " + str(e))
 
 from .io import load_data, load_param_config, normalize_number_string
 from .fitting import fit_with_lmfit, fit_with_scipy, _build_free_params, _params_from_vector
@@ -86,6 +88,28 @@ def sci_format(x, decimals: int = 4):
     return f"{xv:.{decimals}f}"
 
 
+class ParamLineEdit(QLineEdit):
+    """Numeric line edit tuned for quick overwrite in the parameter table."""
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self.selectAll)
+
+    def mousePressEvent(self, event):
+        had_focus = self.hasFocus()
+        super().mousePressEvent(event)
+        if not had_focus:
+            QtCore.QTimer.singleShot(0, self.selectAll)
+
+    def keyPressEvent(self, event):
+        # If the cursor is at the end, Delete is usually a no-op; select all
+        # so a single Delete press clears the field for rewriting.
+        if event.key() == QtCore.Qt.Key_Delete and not self.hasSelectedText():
+            if self.cursorPosition() >= len(self.text()):
+                self.selectAll()
+        super().keyPressEvent(event)
+
+
 class FitWorker(QtCore.QObject):
     progress = QtCore.Signal(int)
     finished = QtCore.Signal(object)
@@ -113,6 +137,130 @@ class FitWorker(QtCore.QObject):
             self.integrator_opts.get('integrator', 'grid'),
             self.integrator_opts.get('accelerator', 'auto'),
         )
+
+        def _refine_param_config(base_cfg, fitted_vals):
+            cfg = copy.deepcopy(base_cfg) if isinstance(base_cfg, dict) else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            if isinstance(fitted_vals, dict):
+                for name, val in fitted_vals.items():
+                    if name in cfg and isinstance(cfg.get(name), dict):
+                        try:
+                            cfg[name]['value'] = float(val)
+                        except Exception:
+                            cfg[name]['value'] = val
+                    else:
+                        try:
+                            cfg[name] = {'value': float(val), 'vary': False}
+                        except Exception:
+                            cfg[name] = {'value': val, 'vary': False}
+            return cfg
+
+        def _score_fit(out_dict):
+            if not isinstance(out_dict, dict):
+                return (0, float('-inf'))
+            converged = bool(out_dict.get('converged', False))
+            try:
+                r2_val = float(out_dict.get('r2', float('-inf')))
+                if not np.isfinite(r2_val):
+                    r2_val = float('-inf')
+            except Exception:
+                r2_val = float('-inf')
+            return (1 if converged else 0, r2_val)
+
+        def _maybe_numpy_refine(first_out):
+            try:
+                integrator = str(self.integrator_opts.get('integrator', 'grid')).strip().lower()
+                selected = str(self.integrator_opts.get('accelerator', 'auto')).strip().lower()
+                effective = resolve_accelerator_mode(integrator, selected)
+                if integrator != 'grid' or effective != 'numba':
+                    return first_out
+                if self._cancel:
+                    return first_out
+                if not isinstance(first_out, dict):
+                    return first_out
+                fitted_first = first_out.get('fitted', None)
+                if not isinstance(fitted_first, dict) or not fitted_first:
+                    return first_out
+
+                refine_cfg = _refine_param_config(self.param_config, fitted_first)
+                refine_integrator_opts = dict(self.integrator_opts)
+                refine_integrator_opts['accelerator'] = 'numpy'
+
+                if self.backend == 'lmfit':
+                    refine_minimizer_opts = dict(self.minimizer_opts or {})
+                    try:
+                        cur = int(refine_minimizer_opts.get('max_nfev', 300))
+                    except Exception:
+                        cur = 300
+                    refine_minimizer_opts['max_nfev'] = max(80, min(cur, 500))
+                    fitted2, errs2, result2, y_model2, r22, conv2, msg2, nfev2 = fit_with_lmfit(
+                        self.iw,
+                        self.y,
+                        refine_cfg,
+                        integrator_opts=refine_integrator_opts,
+                        minimizer_opts=refine_minimizer_opts,
+                        progress_callback=progress_cb,
+                    )
+                    out2 = dict(
+                        fitted=fitted2,
+                        errs=errs2,
+                        result=result2,
+                        y_model=y_model2,
+                        r2=r22,
+                        converged=conv2,
+                        message=msg2,
+                        nfev=nfev2,
+                        accelerator_used='numba->numpy-refine',
+                    )
+                    try:
+                        pcov2 = None
+                        try:
+                            pcov2 = getattr(result2, 'covar', None)
+                        except Exception:
+                            pcov2 = None
+                        if pcov2 is None:
+                            try:
+                                pcov2 = getattr(result2, 'covariance', None)
+                            except Exception:
+                                pcov2 = None
+                        if pcov2 is not None:
+                            out2['pcov'] = pcov2
+                    except Exception:
+                        pass
+                else:
+                    refine_curvefit_opts = dict(self.minimizer_opts or {})
+                    try:
+                        cur = int(refine_curvefit_opts.get('maxfev', 300))
+                    except Exception:
+                        cur = 300
+                    refine_curvefit_opts['maxfev'] = max(80, min(cur, 500))
+                    params2, errs2, popt2, pcov2, y_model2, r22, conv2, msg2, nfev2 = fit_with_scipy(
+                        self.iw,
+                        self.y,
+                        refine_cfg,
+                        integrator_opts=refine_integrator_opts,
+                        curvefit_opts=refine_curvefit_opts,
+                        progress_callback=progress_cb,
+                    )
+                    out2 = dict(
+                        fitted=params2,
+                        errs=errs2,
+                        popt=popt2,
+                        pcov=pcov2,
+                        y_model=y_model2,
+                        r2=r22,
+                        converged=conv2,
+                        message=msg2,
+                        nfev=nfev2,
+                        accelerator_used='numba->numpy-refine',
+                    )
+
+                if _score_fit(out2) >= _score_fit(first_out):
+                    return out2
+                return first_out
+            except Exception:
+                return first_out
 
         try:
             if self.backend == 'lmfit':
@@ -144,6 +292,7 @@ class FitWorker(QtCore.QObject):
                     integrator_opts=self.integrator_opts, curvefit_opts=self.minimizer_opts,
                     progress_callback=progress_cb)
                 out = dict(fitted=params_full, errs=errs_full, popt=popt, pcov=pcov, y_model=y_model, r2=r2, converged=converged, message=message, nfev=nfev, accelerator_used=accel_used)
+            out = _maybe_numpy_refine(out)
             self.finished.emit(out)
         except Exception as e:
             self.error.emit(str(e))
@@ -163,13 +312,23 @@ class MainWindow(QMainWindow):
         self.fit_thread: QtCore.QThread | None = None
         self.fit_worker: FitWorker | None = None
         self.last_y_model = None
-        self._plotly_inline_js_cache = None
-        self._data_token = 0
+        self._legend_artist_map = {}
+        self._hover_x = None
+        self._hover_y = None
+        self._hover_annotation = None
+        self._hover_marker = None
+        self._hover_last_idx = None
+        self._main_plot_cache = {}
+        self._resid_plot_cache = {}
+        self._mpl_motion_cid = None
+        self._mpl_pick_cid = None
+        self._mpl_leave_cid = None
 
         self._init_ui()
         self._apply_app_style()
         try:
-            self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}')
+            self._configure_accelerator_menu()
+            self._update_accel_indicator()
         except Exception:
             pass
 
@@ -193,11 +352,47 @@ class MainWindow(QMainWindow):
                     color: #e9edf2;
                     border-color: #8c99a8;
                 }
-                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
+                QLineEdit, QComboBox, QPlainTextEdit {
                     background: #ffffff;
                     border: 1px solid #c7d2df;
                     border-radius: 5px;
                     padding: 2px 6px;
+                }
+                QSpinBox, QDoubleSpinBox {
+                    background: #ffffff;
+                    border: 1px solid #c7d2df;
+                    border-radius: 5px;
+                    padding: 1px 22px 1px 6px;
+                }
+                QSpinBox::up-button, QDoubleSpinBox::up-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: top right;
+                    width: 18px;
+                    border-left: 1px solid #c7d2df;
+                    border-top-right-radius: 5px;
+                }
+                QSpinBox::down-button, QDoubleSpinBox::down-button {
+                    subcontrol-origin: border;
+                    subcontrol-position: bottom right;
+                    width: 18px;
+                    border-left: 1px solid #c7d2df;
+                    border-bottom-right-radius: 5px;
+                }
+                QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 4px solid transparent;
+                    border-right: 4px solid transparent;
+                    border-bottom: 6px solid #1d2a38;
+                }
+                QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                    border-left: 4px solid transparent;
+                    border-right: 4px solid transparent;
+                    border-top: 6px solid #1d2a38;
                 }
                 QTableWidget {
                     background: #ffffff;
@@ -243,10 +438,53 @@ class MainWindow(QMainWindow):
     def _selected_accelerator(self) -> str:
         try:
             if hasattr(self, 'accel_combo') and self.accel_combo is not None:
-                return str(self.accel_combo.currentText()).strip().lower()
+                txt = str(self.accel_combo.currentText()).strip().lower()
+                if txt.startswith('numba'):
+                    return 'numba'
+                if txt.startswith('numpy'):
+                    return 'numpy'
+                return 'auto'
         except Exception:
             pass
         return 'auto'
+
+    def _configure_accelerator_menu(self):
+        try:
+            if not hasattr(self, 'accel_combo') or self.accel_combo is None:
+                return
+            idx = self.accel_combo.findText('numba')
+            numba_available = resolve_accelerator_mode('grid', 'numba') == 'numba'
+            model = self.accel_combo.model()
+            if idx >= 0 and model is not None:
+                try:
+                    item = model.item(idx)
+                    if item is not None:
+                        item.setEnabled(bool(numba_available))
+                except Exception:
+                    pass
+            if (not numba_available) and self._selected_accelerator() == 'numba':
+                self.accel_combo.setCurrentText('auto')
+            tip = 'Acceleration mode for grid integrator: auto, numba, or numpy'
+            if not numba_available:
+                tip += ' (numba not installed in this environment)'
+            self.accel_combo.setToolTip(tip)
+        except Exception:
+            pass
+
+    def _update_accel_indicator(self):
+        try:
+            selected = self._selected_accelerator()
+            integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+            effective = resolve_accelerator_mode(integrator, selected)
+            integ = str(integrator).strip().lower()
+            if integ == 'quad':
+                self.accel_indicator.setText(f'Accelerator: {selected} -> {effective} (quad ignores accelerator)')
+            elif selected == 'numba' and effective != 'numba':
+                self.accel_indicator.setText(f'Accelerator: {selected} -> {effective} (numba unavailable)')
+            else:
+                self.accel_indicator.setText(f'Accelerator: {selected} -> {effective}')
+        except Exception:
+            pass
 
     def _effective_accelerator_label(self, integrator: str = None) -> str:
         try:
@@ -255,35 +493,189 @@ class MainWindow(QMainWindow):
         except Exception:
             return 'numpy'
 
-    def _build_plotly_head(self):
-        """Return inline plotly script tag and base URL for local assets."""
-        base = QUrl('')
-        if self.assets_dir:
-            local_plotly = os.path.join(self.assets_dir, 'plotly.min.js')
-            if os.path.isfile(local_plotly):
+    def _hide_hover_annotation(self):
+        try:
+            changed = False
+            if self._hover_annotation is not None and self._hover_annotation.get_visible():
+                self._hover_annotation.set_visible(False)
+                changed = True
+            if self._hover_marker is not None and self._hover_marker.get_visible():
+                self._hover_marker.set_visible(False)
+                changed = True
+            if changed:
+                self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _on_axes_leave(self, _event):
+        self._hide_hover_annotation()
+
+    def _on_canvas_motion(self, event):
+        try:
+            if event is None or event.inaxes != self.ax_main:
+                self._hide_hover_annotation()
+                return
+            if self._hover_annotation is None or self._hover_x is None or self._hover_y is None:
+                return
+            if event.xdata is None or event.ydata is None:
+                self._hide_hover_annotation()
+                return
+
+            hx = np.asarray(self._hover_x, dtype=float)
+            hy = np.asarray(self._hover_y, dtype=float)
+            if hx.size == 0 or hy.size == 0:
+                self._hide_hover_annotation()
+                return
+
+            x_lo, x_hi = self.ax_main.get_xlim()
+            y_lo, y_hi = self.ax_main.get_ylim()
+            x_span = max(1e-12, abs(float(x_hi - x_lo)))
+            y_span = max(1e-12, abs(float(y_hi - y_lo)))
+            d2 = ((hx - float(event.xdata)) / x_span) ** 2 + ((hy - float(event.ydata)) / y_span) ** 2
+            idx = int(np.argmin(d2))
+
+            # Do not show a tooltip when the cursor is far from data.
+            if float(d2[idx]) > 0.01:
+                self._hide_hover_annotation()
+                self._hover_last_idx = None
+                return
+
+            if self._hover_last_idx != idx or not self._hover_annotation.get_visible():
+                x_val = float(hx[idx])
+                y_val = float(hy[idx])
+                self._hover_annotation.xy = (x_val, y_val)
+                self._hover_annotation.set_text(f'x={x_val:.6g}\ny={y_val:.6g}')
+                self._hover_annotation.set_visible(True)
                 try:
-                    with open(local_plotly, 'r', encoding='utf-8') as f:
-                        plotly_js = f.read()
-                    base = QUrl.fromLocalFile(os.path.abspath(self.assets_dir) + os.sep)
-                    return f"<script type=\"text/javascript\">{plotly_js}</script>", base
+                    if self._hover_marker is not None:
+                        self._hover_marker.set_data([x_val], [y_val])
+                        self._hover_marker.set_visible(True)
                 except Exception:
                     pass
+                self._hover_last_idx = idx
+                self.canvas.draw_idle()
+        except Exception:
+            pass
 
-        if self._plotly_inline_js_cache is None:
+    def _on_legend_pick(self, event):
+        try:
+            artist = getattr(event, 'artist', None)
+            if artist is None:
+                return
+            if artist not in self._legend_artist_map:
+                return
+            target = self._legend_artist_map.get(artist)
+            if target is None:
+                return
+            vis = not bool(target.get_visible())
+            target.set_visible(vis)
             try:
-                import plotly
-                plotly_js_path = os.path.join(os.path.dirname(plotly.__file__), 'package_data', 'plotly.min.js')
-                with open(plotly_js_path, 'r', encoding='utf-8') as f:
-                    self._plotly_inline_js_cache = f.read()
+                artist.set_alpha(1.0 if vis else 0.2)
             except Exception:
-                try:
-                    from plotly.offline.offline import get_plotlyjs
-                    self._plotly_inline_js_cache = get_plotlyjs()
-                except Exception:
-                    self._plotly_inline_js_cache = ''
-        if self._plotly_inline_js_cache:
-            return f"<script type=\"text/javascript\">{self._plotly_inline_js_cache}</script>", base
-        return '<script type="text/javascript"></script>', base
+                pass
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _rescale_plot_y(self):
+        """Rescale Y axes to data inside currently visible X windows."""
+        try:
+            x = np.asarray(self._main_plot_cache.get('x')) if self._main_plot_cache else None
+            y_data = np.asarray(self._main_plot_cache.get('y_data')) if self._main_plot_cache else None
+            y_model = self._main_plot_cache.get('y_model') if self._main_plot_cache else None
+            if y_model is not None:
+                y_model = np.asarray(y_model)
+            if x is not None and y_data is not None and x.size > 0 and y_data.size == x.size:
+                x_lo, x_hi = self.ax_main.get_xlim()
+                if x_lo > x_hi:
+                    x_lo, x_hi = x_hi, x_lo
+                mask = (x >= float(x_lo)) & (x <= float(x_hi))
+                if np.any(mask):
+                    yvals = list(y_data[mask])
+                    if y_model is not None and y_model.size == x.size:
+                        yvals.extend(list(y_model[mask]))
+                    yvals_arr = np.asarray(yvals, dtype=float)
+                    yvals_arr = yvals_arr[np.isfinite(yvals_arr)]
+                    if yvals_arr.size > 0:
+                        ymin = float(np.min(yvals_arr))
+                        ymax = float(np.max(yvals_arr))
+                        if ymin == ymax:
+                            ymin -= 1e-6
+                            ymax += 1e-6
+                        pad = max(1e-6, 0.05 * (ymax - ymin))
+                        self.ax_main.set_ylim(ymin - pad, ymax + pad)
+
+            xr = np.asarray(self._resid_plot_cache.get('x')) if self._resid_plot_cache else None
+            resid = self._resid_plot_cache.get('resid') if self._resid_plot_cache else None
+            if resid is not None:
+                resid = np.asarray(resid)
+            if xr is not None and resid is not None and xr.size > 0 and resid.size == xr.size:
+                r_lo, r_hi = self.ax_resid.get_xlim()
+                if r_lo > r_hi:
+                    r_lo, r_hi = r_hi, r_lo
+                rmask = (xr >= float(r_lo)) & (xr <= float(r_hi))
+                if np.any(rmask):
+                    vals = np.asarray(resid[rmask], dtype=float)
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size > 0:
+                        ymin = float(np.min(vals))
+                        ymax = float(np.max(vals))
+                        if ymin == ymax:
+                            ymin -= 1e-6
+                            ymax += 1e-6
+                        pad = max(1e-6, 0.05 * (ymax - ymin))
+                        self.ax_resid.set_ylim(ymin - pad, ymax + pad)
+
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _rescale_plot_all(self):
+        """Reset both plots to full data extents."""
+        try:
+            x = np.asarray(self._main_plot_cache.get('x')) if self._main_plot_cache else None
+            y_data = np.asarray(self._main_plot_cache.get('y_data')) if self._main_plot_cache else None
+            y_model = self._main_plot_cache.get('y_model') if self._main_plot_cache else None
+            if y_model is not None:
+                y_model = np.asarray(y_model)
+
+            if x is not None and y_data is not None and x.size > 0 and y_data.size == x.size:
+                self.ax_main.set_xlim(float(np.min(x)), float(np.max(x)))
+                yvals = list(y_data)
+                if y_model is not None and y_model.size == x.size:
+                    yvals.extend(list(y_model))
+                yvals_arr = np.asarray(yvals, dtype=float)
+                yvals_arr = yvals_arr[np.isfinite(yvals_arr)]
+                if yvals_arr.size > 0:
+                    ymin = float(np.min(yvals_arr))
+                    ymax = float(np.max(yvals_arr))
+                    if ymin == ymax:
+                        ymin -= 1e-6
+                        ymax += 1e-6
+                    pad = max(1e-6, 0.05 * (ymax - ymin))
+                    self.ax_main.set_ylim(ymin - pad, ymax + pad)
+
+            xr = np.asarray(self._resid_plot_cache.get('x')) if self._resid_plot_cache else None
+            resid = self._resid_plot_cache.get('resid') if self._resid_plot_cache else None
+            if resid is not None:
+                resid = np.asarray(resid)
+            if xr is not None and xr.size > 0:
+                self.ax_resid.set_xlim(float(np.min(xr)), float(np.max(xr)))
+                if resid is not None and resid.size == xr.size:
+                    vals = np.asarray(resid, dtype=float)
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size > 0:
+                        ymin = float(np.min(vals))
+                        ymax = float(np.max(vals))
+                        if ymin == ymax:
+                            ymin -= 1e-6
+                            ymax += 1e-6
+                        pad = max(1e-6, 0.05 * (ymax - ymin))
+                        self.ax_resid.set_ylim(ymin - pad, ymax + pad)
+
+            self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def _init_ui(self):
         # Use a QSplitter so the user can resize the control pane vs the plots.
@@ -301,12 +693,10 @@ class MainWindow(QMainWindow):
         self.btn_load_json = QPushButton('Load JSON')
         self.btn_save_fitted = QPushButton('Save fitted TXT')
         self.btn_export_params = QPushButton('Export params JSON')
-        self.btn_export_html = QPushButton('Export HTML')
         brl.addWidget(self.btn_load_txt)
         brl.addWidget(self.btn_load_json)
         brl.addWidget(self.btn_save_fitted)
         brl.addWidget(self.btn_export_params)
-        brl.addWidget(self.btn_export_html)
         left_l.addWidget(btn_row)
 
         # show currently loaded data file
@@ -504,6 +894,7 @@ class MainWindow(QMainWindow):
             self.gauss_count_spin = QSpinBox()
             self.gauss_count_spin.setRange(1, 10)
             self.gauss_count_spin.setValue(1)
+            self.gauss_count_spin.setMinimumWidth(70)
             self.gauss_count_spin.setEnabled(False)
             self.gauss_count_spin.valueChanged.connect(lambda v: (self._ensure_gaussian_params(), self._populate_param_table()))
             combo_layout.addWidget(self.gauss_count_spin)
@@ -519,6 +910,7 @@ class MainWindow(QMainWindow):
             self.lorentz_count_spin = QSpinBox()
             self.lorentz_count_spin.setRange(1, 10)
             self.lorentz_count_spin.setValue(1)
+            self.lorentz_count_spin.setMinimumWidth(70)
             self.lorentz_count_spin.setEnabled(False)
             self.lorentz_count_spin.valueChanged.connect(lambda v: (self._ensure_lorentz_params(), self._populate_param_table()))
             combo_layout.addWidget(self.lorentz_count_spin)
@@ -551,23 +943,44 @@ class MainWindow(QMainWindow):
             pass
         left_l.addWidget(self.table)
 
-        # Right pane: plot (QWebEngineView)
-        # use a debug page to capture JS console messages from the embedded plot
-        class _DebugPage(QWebEnginePage):
-            def javaScriptConsoleMessage(self, level, msg, line, sourceID):
-                try:
-                    print(f"JS[{level}] {msg} (line {line} source {sourceID})", flush=True)
-                except Exception:
-                    pass
+        # Right pane: matplotlib preview + toolbar (zoom/pan/home)
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(0, 0, 0, 0)
 
-        self.web = QWebEngineView()
-        dbg_page = _DebugPage(self.web)
-        self.web.setPage(dbg_page)
+        plot_btn_row = QWidget()
+        plot_btn_layout = QHBoxLayout(plot_btn_row)
+        plot_btn_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_plot_rescale_y = QPushButton('Rescale Y')
+        self.btn_plot_rescale_all = QPushButton('Rescale All')
+        self.btn_plot_rescale_y.setToolTip('Rescale Y axes for current visible X range')
+        self.btn_plot_rescale_all.setToolTip('Reset both X and Y axes to show all plotted data')
+        plot_btn_layout.addWidget(self.btn_plot_rescale_y)
+        plot_btn_layout.addWidget(self.btn_plot_rescale_all)
+        plot_btn_layout.addStretch(1)
+
+        self.figure = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvas(self.figure)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        gs = self.figure.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.2)
+        self.ax_main = self.figure.add_subplot(gs[0, 0])
+        self.ax_resid = self.figure.add_subplot(gs[1, 0], sharex=self.ax_main)
+
+        try:
+            self._mpl_motion_cid = self.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+            self._mpl_pick_cid = self.canvas.mpl_connect('pick_event', self._on_legend_pick)
+            self._mpl_leave_cid = self.canvas.mpl_connect('axes_leave_event', self._on_axes_leave)
+        except Exception:
+            pass
+
+        right_l.addWidget(plot_btn_row)
+        right_l.addWidget(self.toolbar)
+        right_l.addWidget(self.canvas, 1)
 
         from PySide6.QtWidgets import QSplitter
         splitter = QSplitter(QtCore.Qt.Horizontal)
         splitter.addWidget(left)
-        splitter.addWidget(self.web)
+        splitter.addWidget(right)
         # reasonable initial sizes (left pane small)
         try:
             splitter.setSizes([360, 800])
@@ -587,11 +1000,12 @@ class MainWindow(QMainWindow):
         self.btn_load_json.clicked.connect(self.load_params)
         self.btn_save_fitted.clicked.connect(self.save_fitted)
         self.btn_export_params.clicked.connect(self.export_params)
-        self.btn_export_html.clicked.connect(self.export_html_report)
         self.btn_step.clicked.connect(lambda: self.start_fit(mode='step'))
         self.btn_fit.clicked.connect(lambda: self.start_fit(mode='full'))
         self.btn_cancel.clicked.connect(self.cancel_fit)
         self.btn_preview.clicked.connect(self.preview_model)
+        self.btn_plot_rescale_y.clicked.connect(self._rescale_plot_y)
+        self.btn_plot_rescale_all.clicked.connect(self._rescale_plot_all)
         try:
             self.btn_apply_range.clicked.connect(lambda: self._apply_fit_range())
         except Exception:
@@ -613,8 +1027,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.accel_combo.currentTextChanged.connect(lambda *_: self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}'))
-            self.integrator_combo.currentTextChanged.connect(lambda *_: self.accel_indicator.setText(f'Accelerator: {self._effective_accelerator_label()}'))
+            self.accel_combo.currentTextChanged.connect(lambda *_: self._update_accel_indicator())
+            self.integrator_combo.currentTextChanged.connect(lambda *_: self._update_accel_indicator())
         except Exception:
             pass
 
@@ -728,7 +1142,7 @@ class MainWindow(QMainWindow):
                 val_str = sci_format(float(val_raw), decimals=4)
             except Exception:
                 val_str = str(val_raw)
-            val_edit = QLineEdit(val_str)
+            val_edit = ParamLineEdit(val_str)
             val_edit.setValidator(self._new_float_validator())
             val_edit.editingFinished.connect(lambda e=val_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 1, val_edit)
@@ -746,7 +1160,7 @@ class MainWindow(QMainWindow):
                 mn_str = sci_format(float(mn), decimals=4) if mn != '' and mn is not None else ''
             except Exception:
                 mn_str = str(mn)
-            min_edit = QLineEdit(mn_str)
+            min_edit = ParamLineEdit(mn_str)
             min_edit.setValidator(self._new_float_validator())
             min_edit.editingFinished.connect(lambda e=min_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 4, min_edit)
@@ -756,7 +1170,7 @@ class MainWindow(QMainWindow):
                 mx_str = sci_format(float(mx), decimals=4) if mx != '' and mx is not None else ''
             except Exception:
                 mx_str = str(mx)
-            max_edit = QLineEdit(mx_str)
+            max_edit = ParamLineEdit(mx_str)
             max_edit.setValidator(self._new_float_validator())
             max_edit.editingFinished.connect(lambda e=max_edit: self._normalize_decimal_line_edit(e))
             self.table.setCellWidget(row, 5, max_edit)
@@ -859,7 +1273,7 @@ class MainWindow(QMainWindow):
         }
 
         try:
-            self.accel_indicator.setText(f"Accelerator: {self._effective_accelerator_label(integrator_opts.get('integrator', 'grid'))}")
+            self._update_accel_indicator()
         except Exception:
             pass
 
@@ -937,7 +1351,12 @@ class MainWindow(QMainWindow):
 
         self.progress.setVisible(True)
         try:
-            self.fit_status.setPlainText(f"Running ({self._effective_accelerator_label(integrator_opts.get('integrator', 'grid'))})")
+            selected_accel = self._selected_accelerator()
+            effective_accel = self._effective_accelerator_label(integrator_opts.get('integrator', 'grid'))
+            if selected_accel != effective_accel:
+                self.fit_status.setPlainText(f"Running (requested {selected_accel}, using {effective_accel})")
+            else:
+                self.fit_status.setPlainText(f"Running ({effective_accel})")
         except Exception:
             pass
         self.fit_thread.start()
@@ -992,7 +1411,11 @@ class MainWindow(QMainWindow):
         r2 = out.get('r2', None)
         accel_used = out.get('accelerator_used', self._effective_accelerator_label()) if isinstance(out, dict) else self._effective_accelerator_label()
         try:
-            self.accel_indicator.setText(f'Accelerator: {accel_used}')
+            selected_accel = self._selected_accelerator()
+            if selected_accel != accel_used:
+                self.accel_indicator.setText(f'Accelerator: {selected_accel} -> {accel_used}')
+            else:
+                self.accel_indicator.setText(f'Accelerator: {accel_used}')
         except Exception:
             pass
         try:
@@ -1338,16 +1761,23 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _render_preview(self, y_model=None):
-        # Build Plotly figures and render in QWebEngineView
+        # Draw data+fit and residuals directly on a matplotlib canvas.
         if self.iw is None or self.y is None:
             return
-        main_fig = go.Figure()
+
         try:
             x_full = np.asarray(self.iw, dtype=float)
             y_full = np.asarray(self.y, dtype=float)
         except Exception:
             x_full = np.asarray(self.iw)
             y_full = np.asarray(self.y)
+
+        if x_full.size == 0 or y_full.size == 0:
+            self.ax_main.clear()
+            self.ax_resid.clear()
+            self.canvas.draw_idle()
+            return
+
         plot_idx = None
         if x_full.size > 6000:
             plot_idx = np.linspace(0, x_full.size - 1, 6000, dtype=int)
@@ -1356,101 +1786,128 @@ class MainWindow(QMainWindow):
         else:
             x_plot_arr = x_full
             y_plot_arr = y_full
-        x_data = list(map(float, x_plot_arr))
-        y_data = list(map(float, y_plot_arr))
-        # Highlight points that hit dataset min or max with a faint red square
+
+        self.ax_main.clear()
+        self.ax_resid.clear()
+        self._legend_artist_map = {}
+        self._hover_last_idx = None
+        try:
+            self._hover_x = np.asarray(x_plot_arr, dtype=float)
+            self._hover_y = np.asarray(y_plot_arr, dtype=float)
+        except Exception:
+            self._hover_x = None
+            self._hover_y = None
+        try:
+            self._hover_annotation = self.ax_main.annotate(
+                '',
+                xy=(0, 0),
+                xytext=(12, 12),
+                textcoords='offset points',
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='#666666', alpha=0.9),
+            )
+            self._hover_annotation.set_visible(False)
+        except Exception:
+            self._hover_annotation = None
+        try:
+            self._hover_marker = self.ax_main.plot(
+                [],
+                [],
+                marker='o',
+                markersize=9,
+                markerfacecolor='none',
+                markeredgecolor='#ff7f0e',
+                markeredgewidth=1.8,
+                linestyle='None',
+                zorder=8,
+            )[0]
+            self._hover_marker.set_visible(False)
+        except Exception:
+            self._hover_marker = None
+
+        # Highlight points that hit dataset min/max to help diagnose clipping.
         try:
             y_min = float(np.min(y_full))
             y_max = float(np.max(y_full))
-            colors = ['rgba(255,0,0,0.15)' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'rgba(31,119,180,0.8)' for v in y_plot_arr]
-            symbols = ['square' if (np.isclose(v, y_min) or np.isclose(v, y_max)) else 'circle' for v in y_plot_arr]
-            main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6, color=colors, symbol=symbols)))
+            edge_mask = np.isclose(y_plot_arr, y_min) | np.isclose(y_plot_arr, y_max)
+            if np.any(~edge_mask):
+                self.ax_main.scatter(x_plot_arr[~edge_mask], y_plot_arr[~edge_mask], s=18, c='tab:blue', alpha=0.8, label='data')
+            if np.any(edge_mask):
+                self.ax_main.scatter(x_plot_arr[edge_mask], y_plot_arr[edge_mask], s=24, marker='s', c='red', alpha=0.25, edgecolors='none', label='data limits')
         except Exception:
-            main_fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='markers', name='data', marker=dict(size=6)))
+            self.ax_main.scatter(x_plot_arr, y_plot_arr, s=18, c='tab:blue', alpha=0.8, label='data')
 
-        # If the Gaussian checkbox is enabled, compute and plot separate
-        # components (integral/base and gaussian) and their sum. Otherwise
-        # fall back to plotting the provided y_model array.
         plotted_model = False
         try:
             params_for_model = {name: info.get('value', 0.0) for name, info in self.param_config.items()} if isinstance(self.param_config, dict) else None
         except Exception:
             params_for_model = None
+
         if params_for_model is not None and ((getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked()) or (getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked())):
             try:
                 grid_sz = int(self.preview_spin.value()) if hasattr(self, 'preview_spin') else 100
                 integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
                 ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
                 ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                base_comp, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(np.asarray(self.iw, dtype=float), params_for_model, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None), accelerator=self._selected_accelerator())
+                base_comp, gauss_total, gauss_components, lorentz_total, lorentz_components = model_components(
+                    np.asarray(self.iw, dtype=float),
+                    params_for_model,
+                    integrator=integrator,
+                    grid_size=grid_sz,
+                    ik_min=ik_min,
+                    ik_max=ik_max,
+                    kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None),
+                    accelerator=self._selected_accelerator(),
+                )
                 base_arr = np.asarray(base_comp, dtype=float)
                 gauss_total_arr = np.asarray(gauss_total, dtype=float)
                 lorentz_total_arr = np.asarray(lorentz_total, dtype=float)
-                # Build summed model respecting which component types are enabled
                 sum_arr = base_arr.copy()
                 if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked():
                     sum_arr = sum_arr + gauss_total_arr
                 if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked():
                     sum_arr = sum_arr + lorentz_total_arr
-                if plot_idx is not None:
-                    base_plot = base_arr[plot_idx]
-                    sum_plot = sum_arr[plot_idx]
-                else:
-                    base_plot = base_arr
-                    sum_plot = sum_arr
-                # Integral / PCM component
-                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, base_plot)), mode='lines', name='integral component', line=dict(width=2, dash='dash')))
-                # Plot gaussian components only when enabled and non-zero
+
+                base_plot = base_arr[plot_idx] if plot_idx is not None and base_arr.size == x_full.size else base_arr
+                sum_plot = sum_arr[plot_idx] if plot_idx is not None and sum_arr.size == x_full.size else sum_arr
+                if base_plot.size == x_plot_arr.size:
+                    self.ax_main.plot(x_plot_arr, base_plot, linestyle='--', linewidth=1.6, label='integral component')
                 if getattr(self, 'gauss_cb', None) and self.gauss_cb.isChecked() and gauss_components is not None:
                     for j, comp in enumerate(gauss_components):
                         try:
                             arr = np.asarray(comp, dtype=float)
                             if np.any(np.abs(arr) > 1e-12):
-                                arr_plot = arr[plot_idx] if plot_idx is not None else arr
-                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr_plot)), mode='lines', name=f'gaussian {j+1}', line=dict(width=2, dash='dot')))
+                                arr_plot = arr[plot_idx] if plot_idx is not None and arr.size == x_full.size else arr
+                                if arr_plot.size == x_plot_arr.size:
+                                    self.ax_main.plot(x_plot_arr, arr_plot, linestyle=':', linewidth=1.4, label=f'gaussian {j+1}')
                         except Exception:
                             pass
-                # Plot lorentzian components only when enabled and non-zero
                 if getattr(self, 'lorentz_cb', None) and self.lorentz_cb.isChecked() and lorentz_components is not None:
                     for j, comp in enumerate(lorentz_components):
                         try:
                             arr = np.asarray(comp, dtype=float)
                             if np.any(np.abs(arr) > 1e-12):
-                                arr_plot = arr[plot_idx] if plot_idx is not None else arr
-                                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, arr_plot)), mode='lines', name=f'lorentzian {j+1}', line=dict(width=2, dash='dot')))
+                                arr_plot = arr[plot_idx] if plot_idx is not None and arr.size == x_full.size else arr
+                                if arr_plot.size == x_plot_arr.size:
+                                    self.ax_main.plot(x_plot_arr, arr_plot, linestyle=':', linewidth=1.4, label=f'lorentzian {j+1}')
                         except Exception:
                             pass
-                main_fig.add_trace(go.Scatter(x=x_data, y=list(map(float, sum_plot)), mode='lines', name='fit', line=dict(width=3)))
+                if sum_plot.size == x_plot_arr.size:
+                    self.ax_main.plot(x_plot_arr, sum_plot, linewidth=2.2, label='fit')
                 plotted_model = True
             except Exception:
                 plotted_model = False
+
         if not plotted_model and y_model is not None:
             try:
-                y_model_arr = np.asarray(y_model)
-                if plot_idx is not None and y_model_arr.size == np.asarray(self.iw).size:
+                y_model_arr = np.asarray(y_model, dtype=float)
+                if plot_idx is not None and y_model_arr.size == x_full.size:
                     y_model_arr = y_model_arr[plot_idx]
-                y_model_list = list(map(float, y_model_arr))
-                main_fig.add_trace(go.Scatter(x=x_data, y=y_model_list, mode='lines', name='fit', line=dict(width=2)))
+                if y_model_arr.size == x_plot_arr.size:
+                    self.ax_main.plot(x_plot_arr, y_model_arr, linewidth=2.0, label='fit')
             except Exception:
                 pass
-        # If a fit-range is specified, highlight it on the main plot
-        try:
-            if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
-                x0 = float(self.fit_xmin_spin.value())
-                x1 = float(self.fit_xmax_spin.value())
-                if x0 < x1:
-                    main_fig.add_vrect(x0=x0, x1=x1, fillcolor='LightSalmon', opacity=0.2, layer='below', line_width=0)
-        except Exception:
-            pass
-        main_fig.update_layout(
-            title='Data and Fit',
-            margin=dict(l=40, r=10, t=80, b=40),
-            height=520,
-            showlegend=True,
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
-        )
 
-        # Determine selected fit-range mask (if any) and whether to rescale
+        # Determine selected fit-range mask (if any).
         try:
             x_arr = np.asarray(self.iw, dtype=float)
             y_arr = np.asarray(self.y, dtype=float)
@@ -1459,6 +1916,8 @@ class MainWindow(QMainWindow):
             y_arr = np.asarray(self.y)
 
         mask = None
+        x0 = None
+        x1 = None
         try:
             if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
                 x0 = float(self.fit_xmin_spin.value())
@@ -1466,202 +1925,170 @@ class MainWindow(QMainWindow):
                 if x0 > x1:
                     x0, x1 = x1, x0
                 mask = (x_arr >= x0) & (x_arr <= x1)
+                if x0 < x1:
+                    self.ax_main.axvspan(x0, x1, facecolor='lightsalmon', alpha=0.2)
         except Exception:
             mask = None
 
-        # Residuals: compute across the full x-range even if a fit-range
-        # (mask) was used when fitting. Prefer an explicit full-length
-        # `y_model` argument, then `self.last_y_model`, then attempt a
-        # recompute from the last fit output or current param_config.
-        res_fig = go.Figure()
+        # Residuals: prefer explicit full-length y_model, then cached model,
+        # then recompute from latest fit output/current params.
+        y_model_arr = None
         try:
+            if y_model is not None and np.asarray(y_model).size == x_arr.size:
+                y_model_arr = np.asarray(y_model, dtype=float)
+        except Exception:
             y_model_arr = None
+
+        if y_model_arr is None:
             try:
-                if y_model is not None and np.asarray(y_model).size == x_arr.size:
-                    y_model_arr = np.asarray(y_model, dtype=float)
+                if getattr(self, 'last_y_model', None) is not None and np.asarray(self.last_y_model).size == x_arr.size:
+                    y_model_arr = np.asarray(self.last_y_model, dtype=float)
             except Exception:
                 y_model_arr = None
 
-            if y_model_arr is None:
+        if y_model_arr is None:
+            params_try = None
+            if getattr(self, 'last_fit_out', None) is not None:
+                out = self.last_fit_out
+                params_try = out.get('fitted') or out.get('params') or None
+            if params_try is None:
                 try:
-                    if getattr(self, 'last_y_model', None) is not None and np.asarray(self.last_y_model).size == x_arr.size:
-                        y_model_arr = np.asarray(self.last_y_model, dtype=float)
+                    params_try = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
+                except Exception:
+                    params_try = None
+            if params_try is not None:
+                try:
+                    grid_sz = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
+                    integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
+                    ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
+                    ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
+                    y_full_try = compute_model(
+                        self.iw,
+                        params_try,
+                        integrator=integrator,
+                        grid_size=grid_sz,
+                        ik_min=ik_min,
+                        ik_max=ik_max,
+                        kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None),
+                        accelerator=self._selected_accelerator(),
+                    )
+                    if np.asarray(y_full_try).size == x_arr.size:
+                        y_model_arr = np.asarray(y_full_try, dtype=float)
                 except Exception:
                     y_model_arr = None
 
-            if y_model_arr is None:
-                # Try to recompute from last fit output or current params
-                params_try = None
-                if getattr(self, 'last_fit_out', None) is not None:
-                    out = self.last_fit_out
-                    params_try = out.get('fitted') or out.get('params') or None
-                if params_try is None:
-                    try:
-                        params_try = {name: info.get('value', 0.0) for name, info in self.param_config.items()}
-                    except Exception:
-                        params_try = None
-                if params_try is not None:
-                    try:
-                        grid_sz = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
-                        integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
-                        ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
-                        ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-                        y_full_try = compute_model(self.iw, params_try, integrator=integrator, grid_size=grid_sz, ik_min=ik_min, ik_max=ik_max, kernel=(self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None), accelerator=self._selected_accelerator())
-                        if np.asarray(y_full_try).size == x_arr.size:
-                            y_model_arr = np.asarray(y_full_try, dtype=float)
-                    except Exception:
-                        y_model_arr = None
-
-            if y_model_arr is not None:
+        resid_arr = None
+        if y_model_arr is not None:
+            try:
                 resid_arr = y_arr - y_model_arr
                 if plot_idx is not None and resid_arr.size == x_arr.size:
-                    res_x = list(map(float, x_arr[plot_idx]))
-                    res_y = list(map(float, resid_arr[plot_idx]))
+                    res_x = x_arr[plot_idx]
+                    res_y = resid_arr[plot_idx]
                 else:
-                    res_x = list(map(float, x_arr))
-                    res_y = list(map(float, resid_arr))
-                if len(res_x) > 0:
-                    res_fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='markers', name='residuals', marker=dict(size=4)))
-            else:
-                # no model available: show zero-line residuals across full x
-                res_fig.add_trace(go.Scatter(x=x_data, y=[0.0] * len(x_data), mode='markers', name='residuals', marker=dict(size=4)))
-        except Exception:
-            try:
-                res_fig.add_trace(go.Scatter(x=x_data, y=[0.0] * len(x_data), mode='markers', name='residuals', marker=dict(size=4)))
+                    res_x = x_arr
+                    res_y = resid_arr
+                if res_x.size > 0:
+                    self.ax_resid.scatter(res_x, res_y, s=12, c='0.3', label='residuals')
             except Exception:
-                pass
+                resid_arr = None
 
-        # If requested, rescale main plot to selected x-range and y-limits of masked data/model
+        if resid_arr is None:
+            self.ax_resid.scatter(x_plot_arr, np.zeros_like(x_plot_arr), s=12, c='0.3', label='residuals')
+
+        # Rescale main plot axes only when the checkbox is enabled.
         try:
             if hasattr(self, 'rescale_cb') and self.rescale_cb.isChecked() and mask is not None and np.any(mask):
-                # x-limits
-                main_fig.update_xaxes(range=[float(x0), float(x1)])
-                # y-limits based on data/model inside mask
+                self.ax_main.set_xlim(float(x0), float(x1))
                 yvals = []
                 try:
                     yvals.extend(list(y_arr[mask]))
                 except Exception:
                     pass
                 try:
-                    if y_model is not None:
+                    if y_model_arr is not None:
                         yvals.extend(list(y_model_arr[mask]))
                 except Exception:
                     pass
-                if len(yvals) > 0:
-                    ymin = float(np.min(yvals))
-                    ymax = float(np.max(yvals))
+                yvals_arr = np.asarray(yvals, dtype=float)
+                yvals_arr = yvals_arr[np.isfinite(yvals_arr)]
+                if yvals_arr.size > 0:
+                    ymin = float(np.min(yvals_arr))
+                    ymax = float(np.max(yvals_arr))
                     if ymin == ymax:
-                        # small padding when flat
                         ymin -= 1e-6
                         ymax += 1e-6
                     pad = max(1e-6, 0.05 * (ymax - ymin))
-                    main_fig.update_yaxes(range=[ymin - pad, ymax + pad])
+                    self.ax_main.set_ylim(ymin - pad, ymax + pad)
         except Exception:
             pass
 
-        # Autoscale residuals y-axis using residuals inside the selected mask
-        # (so the residual plot range reflects the fit region), but show the
-        # full x-range unless the user asked to rescale the plot to the range.
+        # Residual y autoscale in fit region, with optional x-range restriction.
         try:
-            res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
-            if mask is not None and np.any(mask) and y_model is not None:
-                try:
-                    y_model_arr = np.asarray(y_model)
-                    resid_full = y_arr - y_model_arr
-                    resid_mask = resid_full[mask]
-                    if resid_mask.size > 0:
-                        ymin = float(np.min(resid_mask))
-                        ymax = float(np.max(resid_mask))
-                        if ymin == ymax:
-                            ymin -= 1e-6
-                            ymax += 1e-6
-                        pad = max(1e-6, 0.05 * (ymax - ymin))
-                        res_fig.update_yaxes(range=[ymin - pad, ymax + pad])
-                except Exception:
-                    pass
-            # Optionally restrict residual x-axis to the selected range when the
-            # 'Rescale plot to range' checkbox is checked. Otherwise leave the
-            # residuals showing across the full spectrum.
+            if mask is not None and np.any(mask) and resid_arr is not None:
+                resid_mask = np.asarray(resid_arr[mask], dtype=float)
+                resid_mask = resid_mask[np.isfinite(resid_mask)]
+                if resid_mask.size > 0:
+                    ymin = float(np.min(resid_mask))
+                    ymax = float(np.max(resid_mask))
+                    if ymin == ymax:
+                        ymin -= 1e-6
+                        ymax += 1e-6
+                    pad = max(1e-6, 0.05 * (ymax - ymin))
+                    self.ax_resid.set_ylim(ymin - pad, ymax + pad)
             if mask is not None and np.any(mask) and getattr(self, 'rescale_cb', None) and self.rescale_cb.isChecked():
-                res_fig.update_xaxes(range=[float(x0), float(x1)])
-        except Exception:
-            try:
-                res_fig.update_layout(title='Residuals', margin=dict(l=40, r=10, t=30, b=30), height=240, showlegend=False)
-            except Exception:
-                pass
-
-        main_div = main_fig.to_html(full_html=False, include_plotlyjs=False)
-        resid_div = res_fig.to_html(full_html=False, include_plotlyjs=False)
-
-        # Ensure explicit pixel heights for the embedded plot containers. The
-        # default fragment uses `height:100%` which collapses inside our page
-        # and can make the traces invisible. Replace that with the figure's
-        # explicit height (pixels) so the QWebEngineView renders markers.
-        try:
-            main_h = int(main_fig.layout.height) if getattr(main_fig.layout, 'height', None) is not None else 520
-        except Exception:
-            main_h = 520
-        try:
-            resid_h = int(res_fig.layout.height) if getattr(res_fig.layout, 'height', None) is not None else 240
-        except Exception:
-            resid_h = 240
-        main_div = main_div.replace('height:100%;', f'height:{main_h}px;')
-        resid_div = resid_div.replace('height:100%;', f'height:{resid_h}px;')
-
-        # Math block (empty - no message shown in preview)
-        math_block = ''
-
-        # Compose final HTML with an inline/offline Plotly script (no CDN dependency).
-        plotly_head, base = self._build_plotly_head()
-
-        html = f"""<!doctype html>
-<html>
-    <head>
-        <meta charset="utf-8">
-        <title>PeakFit Preview</title>
-        {plotly_head}
-        <style> body {{ font-family: Arial, sans-serif; margin:10px; }} table {{ width:100%; border-collapse:collapse; }} td, th {{ border:1px solid #ddd; padding:6px; }}</style>
-    </head>
-    <body>
-        <div class="main">{main_div}</div>
-        <div class="resid">{resid_div}</div>
-        <div class="math">{math_block}</div>
-    </body>
-</html>"""
-
-        # small JS to sync the main plot's x-range to the residuals plot
-        sync_js = '''<script>
-(function(){
-    function setupSync(){
-        var plots = document.getElementsByClassName('plotly-graph-div');
-        if(!plots || plots.length < 2) return;
-        var main = plots[0], resid = plots[1];
-        function handler(eventdata){
-            try{
-                if(eventdata['xaxis.range[0]'] !== undefined && eventdata['xaxis.range[1]'] !== undefined){
-                    Plotly.relayout(resid, {'xaxis.range':[eventdata['xaxis.range[0]'], eventdata['xaxis.range[1]']]});
-                } else if(eventdata['xaxis.range']){
-                    Plotly.relayout(resid, {'xaxis.range':eventdata['xaxis.range']});
-                } else if(eventdata['xaxis.autorange'] === true){
-                    Plotly.relayout(resid, {'xaxis.autorange': true});
-                }
-            }catch(e){}
-        }
-        try{ main.on('plotly_relayout', handler); }catch(e){}
-    }
-    if(document.readyState==='complete'){ setTimeout(setupSync, 100); } else { window.addEventListener('load', function(){ setTimeout(setupSync, 100); }); }
-})();
-</script>'''
-        try:
-            html = html.replace('</body>', sync_js + '\n</body>')
+                self.ax_resid.set_xlim(float(x0), float(x1))
         except Exception:
             pass
 
-        # remember last model for saving
-        self.last_y_model = None if y_model is None else np.asarray(y_model)
+        # Cache arrays used by manual rescale controls.
+        try:
+            self._main_plot_cache = {
+                'x': np.asarray(x_arr, dtype=float),
+                'y_data': np.asarray(y_arr, dtype=float),
+                'y_model': (np.asarray(y_model_arr, dtype=float) if y_model_arr is not None else None),
+            }
+        except Exception:
+            self._main_plot_cache = {}
+        try:
+            self._resid_plot_cache = {
+                'x': np.asarray(x_arr, dtype=float),
+                'resid': (np.asarray(resid_arr, dtype=float) if resid_arr is not None else None),
+            }
+        except Exception:
+            self._resid_plot_cache = {}
 
-        # Load HTML into view.
-        self.web.setHtml(html, base)
+        self.ax_main.set_title('Data and Fit')
+        self.ax_main.set_ylabel('Intensity')
+        self.ax_main.grid(True, alpha=0.25)
+        self.ax_resid.set_title('Residuals')
+        self.ax_resid.set_ylabel('Residuals')
+        self.ax_resid.set_xlabel('X')
+        self.ax_resid.axhline(0.0, color='black', linewidth=0.8, alpha=0.5)
+        self.ax_resid.grid(True, alpha=0.25)
+        try:
+            handles, labels = self.ax_main.get_legend_handles_labels()
+            if handles:
+                legend = self.ax_main.legend(loc='upper center', bbox_to_anchor=(0.5, 1.18), ncol=min(4, len(handles)), fontsize=8)
+                leg_handles = getattr(legend, 'legend_handles', None)
+                if leg_handles is None:
+                    leg_handles = getattr(legend, 'legendHandles', [])
+                for leg_h, orig_h in zip(leg_handles, handles):
+                    try:
+                        leg_h.set_picker(True)
+                        if hasattr(leg_h, 'set_pickradius'):
+                            leg_h.set_pickradius(8)
+                    except Exception:
+                        pass
+                    self._legend_artist_map[leg_h] = orig_h
+        except Exception:
+            pass
+
+        try:
+            self.figure.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+        self.last_y_model = None if y_model is None else np.asarray(y_model)
 
     def save_fitted(self):
         # Save currently shown fit data (if available)
@@ -1976,114 +2403,11 @@ class MainWindow(QMainWindow):
             QtWidgets.QMessageBox.critical(self, 'Error', str(e))
 
     def export_html_report(self):
-        # Export a full HTML report using the plotting helper (if available)
-        try:
-            from .plotting import plot_fit
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, 'Error', f'Plotting helper not available: {e}')
-            return
-
-        if self.iw is None or self.y is None:
-            QtWidgets.QMessageBox.warning(self, 'Warning', 'Load data first')
-            return
-
-        path, _ = QFileDialog.getSaveFileName(self, 'Export HTML report', 'fit_report.html', 'HTML Files (*.html);;All Files (*)')
-        if not path:
-            return
-
-        # Ask whether to export the full spectrum or only the selected range
-        export_full = False
-        try:
-            dlg = QtWidgets.QMessageBox(self)
-            dlg.setWindowTitle('Export Range')
-            dlg.setText('Export full spectrum or only the selected range?')
-            full_btn = dlg.addButton('Full spectrum', QtWidgets.QMessageBox.AcceptRole)
-            sel_btn = dlg.addButton('Selected range', QtWidgets.QMessageBox.AcceptRole)
-            cancel_btn = dlg.addButton(QtWidgets.QMessageBox.Cancel)
-            dlg.exec()
-            clicked = dlg.clickedButton()
-            if clicked == cancel_btn:
-                return
-            elif clicked == full_btn:
-                export_full = True
-            else:
-                export_full = False
-        except Exception:
-            export_full = False
-
-        # prepare parameters and errs from last fit if present
-        params = None
-        errs = None
-        r2 = None
-        converged = None
-        msg = None
-        if getattr(self, 'last_fit_out', None) is not None:
-            out = self.last_fit_out
-            params = out.get('fitted') or out.get('params') or None
-            errs = out.get('errs') or None
-            r2 = out.get('r2')
-            converged = out.get('converged')
-            msg = out.get('message')
-
-        try:
-            # Respect the selected fit range: slice data/model to the selected x-range
-            try:
-                x_arr = np.asarray(self.iw, dtype=float)
-                y_arr = np.asarray(self.y, dtype=float)
-                if export_full:
-                    mask = np.ones_like(x_arr, dtype=bool)
-                else:
-                    if hasattr(self, 'fit_xmin_spin') and hasattr(self, 'fit_xmax_spin'):
-                        x0 = float(self.fit_xmin_spin.value())
-                        x1 = float(self.fit_xmax_spin.value())
-                        if x0 > x1:
-                            x0, x1 = x1, x0
-                        mask = (x_arr >= x0) & (x_arr <= x1)
-                        if not np.any(mask):
-                            QtWidgets.QMessageBox.warning(self, 'Warning', 'Selected range contains no data points; nothing to export')
-                            return
-                    else:
-                        mask = np.ones_like(x_arr, dtype=bool)
-            except Exception:
-                x_arr = np.asarray(self.iw)
-                y_arr = np.asarray(self.y)
-                mask = np.ones_like(x_arr, dtype=bool)
-
-            iw_sel = x_arr[mask]
-            y_sel = y_arr[mask]
-
-            # Prepare parameters for plotting (prefer last fit output, fallback to param_config)
-            params_plot = params if params is not None else ({name: info.get('value', 0.0) for name, info in self.param_config.items()} if isinstance(self.param_config, dict) else None)
-
-            # Compute fitted model across full x grid and slice to match selection so plots align
-            y_full = None
-            kernel = self.kernel_combo.currentText() if hasattr(self, 'kernel_combo') else None
-            integrator = self.integrator_combo.currentText() if hasattr(self, 'integrator_combo') else 'grid'
-            grid_size = int(self.grid_spin.value()) if hasattr(self, 'grid_spin') else 4000
-            ik_min = float(self.ik_min_spin.value()) if hasattr(self, 'ik_min_spin') else 0.0
-            ik_max = float(self.ik_max_spin.value()) if hasattr(self, 'ik_max_spin') else 1.0
-            try:
-                if params_plot is not None:
-                    y_full = compute_model(self.iw, params_plot, integrator=integrator, grid_size=grid_size, ik_min=ik_min, ik_max=ik_max, kernel=kernel, accelerator=self._selected_accelerator())
-            except Exception:
-                y_full = None
-
-            if y_full is None:
-                # fallback to last_y_model when recompute fails
-                if getattr(self, 'last_y_model', None) is not None and np.asarray(self.last_y_model).size == np.asarray(self.iw).size:
-                    y_full = np.asarray(self.last_y_model)
-                else:
-                    y_full = np.zeros_like(x_arr)
-
-            y_model_sel = np.asarray(y_full)[mask]
-
-            plot_fit(iw_sel, y_sel, y_model_sel,
-                     params=params_plot, param_errs=errs, r2=r2,
-                     output_html=path, show=False, converged=converged, convergence_message=msg,
-                     assets_dir=self.assets_dir, kernel=kernel, accelerator=self._selected_accelerator())
-            QtWidgets.QMessageBox.information(self, 'Exported', f'HTML report saved to {path}')
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, 'Error', f'Failed to export HTML: {e}')
+        QtWidgets.QMessageBox.information(
+            self,
+            'Not available',
+            'GUI HTML export is disabled in this build. Use Save fitted TXT/Export params JSON, or use scripts/fit_peak.py for HTML output.',
+        )
 
     def _show_kernel_info(self):
         try:
@@ -2538,6 +2862,8 @@ class MainWindow(QMainWindow):
             # Update plot
             try:
                 self._render_preview(y_model=self.last_y_model if getattr(self, 'last_y_model', None) is not None else None)
+                if hasattr(self, 'rescale_cb') and self.rescale_cb.isChecked():
+                    self._rescale_plot_y()
                 try:
                     self.fit_status.setPlainText('Data normalized to [0,1]')
                 except Exception:

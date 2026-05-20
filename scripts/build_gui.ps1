@@ -41,12 +41,12 @@ $args = @(
     '--noconfirm',
     '--windowed',
     '--name', 'peakfit_gui',
-    '--collect-data', 'plotly'
+    '--collect-data', 'matplotlib'
 )
 if ($addDataCfg) { $args += '--add-data'; $args += $addDataCfg }
 if ($addDataAssets) { $args += '--add-data'; $args += $addDataAssets }
 $args += '--hidden-import'; $args += 'lmfit'
-$args += '--hidden-import'; $args += 'plotly'
+$args += '--hidden-import'; $args += 'matplotlib.backends.backend_qtagg'
 $args += 'scripts\gui_app.py'
 
 & $venvPython -m PyInstaller $args

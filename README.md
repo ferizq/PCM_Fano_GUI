@@ -135,12 +135,11 @@ PowerShell (from repo root, with venv active):
 .\.venv\Scripts\python.exe -m scripts.gui_app
 ```
 
-The GUI now runs offline by default (no CDN links): Plotly is bundled/embedded in generated previews and reports.
+The GUI preview now uses an embedded matplotlib canvas with a native toolbar
+(zoom/pan/home) for data+fit and residual plots.
 
-Optional: if you want rendered math formulas in exported reports, place local KaTeX files in `assets/`:
-- `katex.min.css`
-- `katex.min.js`
-- `auto-render.min.js`
+GUI HTML export is disabled. If you still need HTML reports, use the CLI path
+(`scripts/fit_peak.py`), which keeps Plotly-based HTML output.
 
 Build a folder-based portable GUI distribution with the helper script:
 
