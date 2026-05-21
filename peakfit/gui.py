@@ -370,7 +370,27 @@ class MainWindow(QMainWindow):
                     font-size: 10pt;
                     color: #1d2a38;
                 }
-                QLabel, QCheckBox { color: #1d2a38; }
+                QLabel { color: #1d2a38; }
+                QCheckBox {
+                    color: #1d2a38;
+                    spacing: 6px;
+                    font-weight: 700;
+                }
+                /* Larger, more visible checkbox indicator */
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                    border: 1px solid #7a8da3;
+                    border-radius: 4px;
+                    background: #ffffff;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #1f4e79;
+                    border: 1px solid #153a60;
+                }
+                QCheckBox::indicator:hover {
+                    border: 1px solid #1f4e79;
+                }
                 QPushButton {
                     background-color: #1f4e79;
                     color: #ffffff;
@@ -773,6 +793,25 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         left_l = QVBoxLayout(left)
+        try:
+            left_l.setSpacing(6)
+        except Exception:
+            pass
+
+        # Helper: buttons can expand, but not beyond ~2x their text width.
+        def _shrink_btn(btn, pad: int = 18):
+            try:
+                fm = btn.fontMetrics()
+                text_w = max(1, fm.horizontalAdvance(str(btn.text())))
+                min_w = int(text_w + pad)
+                max_w = int((2.0 * text_w) + pad)
+                if max_w < min_w:
+                    max_w = min_w
+                btn.setMinimumWidth(min_w)
+                btn.setMaximumWidth(max_w)
+                btn.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            except Exception:
+                pass
 
         btn_row = QWidget()
         brl = QHBoxLayout(btn_row)
@@ -784,6 +823,14 @@ class MainWindow(QMainWindow):
         brl.addWidget(self.btn_load_json)
         brl.addWidget(self.btn_save_fitted)
         brl.addWidget(self.btn_export_params)
+        try:
+            # Main action buttons can span the available row width.
+            self.btn_load_txt.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            self.btn_load_json.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            self.btn_save_fitted.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            self.btn_export_params.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
         left_l.addWidget(btn_row)
 
         # show currently loaded data file
@@ -803,6 +850,12 @@ class MainWindow(QMainWindow):
         bfr.addWidget(self.btn_step)
         bfr.addWidget(self.btn_fit)
         bfr.addWidget(self.btn_cancel)
+        try:
+            self.btn_step.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            self.btn_fit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+            self.btn_cancel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
         left_l.addWidget(btn_fit_row)
 
         # Integrator & backend controls
@@ -811,113 +864,359 @@ class MainWindow(QMainWindow):
         ctrl_v = QVBoxLayout(ctrl_container)
         ctrl_v.setContentsMargins(0, 0, 0, 0)
 
-        # Row 1: backend + integrator + accelerator
+        # Row 1: backend + integrator + accelerator (grouped label+control pairs)
         ctrl_row1 = QWidget()
         ctrl1 = QHBoxLayout(ctrl_row1)
         ctrl1.setContentsMargins(0, 0, 0, 0)
-        ctrl1.addWidget(QLabel('Backend:'))
+        try:
+            ctrl1.setSpacing(6)
+        except Exception:
+            pass
+
+        # Backend group
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(['lmfit', 'scipy'])
-        ctrl1.addWidget(self.backend_combo)
-        ctrl1.addWidget(QLabel('Integrator:'))
+        try:
+            self.backend_combo.setFixedWidth(100)
+        except Exception:
+            pass
+        backend_w = QWidget()
+        backend_l = QHBoxLayout(backend_w)
+        backend_l.setContentsMargins(0, 0, 0, 0)
+        backend_l.setSpacing(4)
+        backend_l.addWidget(QLabel('Backend:'))
+        backend_l.addWidget(self.backend_combo)
+        try:
+            backend_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1.addWidget(backend_w)
+
+        # Integrator group
         self.integrator_combo = QComboBox()
         self.integrator_combo.addItems(['grid', 'quad'])
-        ctrl1.addWidget(self.integrator_combo)
-        ctrl1.addWidget(QLabel('Accelerator:'))
+        try:
+            self.integrator_combo.setFixedWidth(80)
+        except Exception:
+            pass
+        integ_w = QWidget()
+        integ_l = QHBoxLayout(integ_w)
+        integ_l.setContentsMargins(0, 0, 0, 0)
+        integ_l.setSpacing(4)
+        integ_l.addWidget(QLabel('Integrator:'))
+        integ_l.addWidget(self.integrator_combo)
+        try:
+            integ_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1.addWidget(integ_w)
+
+        # Accelerator group
         self.accel_combo = QComboBox()
         self.accel_combo.addItems(['auto', 'numba', 'numpy'])
         self.accel_combo.setCurrentText('auto')
-        ctrl1.addWidget(self.accel_combo)
+        try:
+            self.accel_combo.setFixedWidth(80)
+        except Exception:
+            pass
+        accel_w = QWidget()
+        accel_l = QHBoxLayout(accel_w)
+        accel_l.setContentsMargins(0, 0, 0, 0)
+        accel_l.setSpacing(4)
+        accel_l.addWidget(QLabel('Accelerator:'))
+        accel_l.addWidget(self.accel_combo)
+        try:
+            accel_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1.addWidget(accel_w)
+
         ctrl_v.addWidget(ctrl_row1)
 
         # Row 2: kernel + fit range controls
         ctrl_row1b = QWidget()
         ctrl1b = QHBoxLayout(ctrl_row1b)
         ctrl1b.setContentsMargins(0, 0, 0, 0)
-        ctrl1b.addWidget(QLabel('Kernel:'))
+        # Kernel selector group (label + combo + info button)
         self.kernel_combo = QComboBox()
         self.kernel_combo.addItems(['PCM_Fano_Bessel', 'PCM_Fano_Gauss'])
-        ctrl1b.addWidget(self.kernel_combo)
-        self.btn_kernel_info = QPushButton('Info')
-        ctrl1b.addWidget(self.btn_kernel_info)
-        ctrl1b.addWidget(QLabel('Fit x start:'))
+        # Compact single-character info button (ℹ) — keeps tooltip
+        self.btn_kernel_info = QPushButton('ℹ')
+        try:
+            fm = self.btn_kernel_info.fontMetrics()
+            w = max(20, fm.horizontalAdvance('ℹ') + 12)
+            h = max(20, fm.height() + 8)
+            self.btn_kernel_info.setFixedSize(int(w), int(h))
+            self.btn_kernel_info.setStyleSheet('padding:0px; border-radius:%dpx;' % (int(h/2)))
+        except Exception:
+            try:
+                self.btn_kernel_info.setFixedSize(26, 26)
+            except Exception:
+                pass
+        kernel_w = QWidget()
+        kernel_l = QHBoxLayout(kernel_w)
+        kernel_l.setContentsMargins(0, 0, 0, 0)
+        kernel_l.setSpacing(4)
+        kernel_l.addWidget(QLabel('Kernel:'))
+        try:
+            self.kernel_combo.setFixedWidth(160)
+        except Exception:
+            pass
+        kernel_l.addWidget(self.kernel_combo)
+        kernel_l.addWidget(self.btn_kernel_info)
+        try:
+            kernel_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1b.addWidget(kernel_w)
+        # Group label + spin widgets so they remain attached when resizing
         self.fit_xmin_spin = QSpinBox()
         self.fit_xmin_spin.setRange(-999999999, 999999999)
         self.fit_xmin_spin.setSingleStep(1)
         self.fit_xmin_spin.setValue(0)
-        ctrl1b.addWidget(self.fit_xmin_spin)
-        ctrl1b.addWidget(QLabel('Fit x end:'))
+        try:
+            self.fit_xmin_spin.setFixedWidth(88)
+        except Exception:
+            pass
+        fit_xmin_w = QWidget()
+        fit_xmin_l = QHBoxLayout(fit_xmin_w)
+        fit_xmin_l.setContentsMargins(0, 0, 0, 0)
+        fit_xmin_l.setSpacing(4)
+        fit_xmin_l.addWidget(QLabel('Fit x start:'))
+        fit_xmin_l.addWidget(self.fit_xmin_spin)
+        try:
+            fit_xmin_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1b.addWidget(fit_xmin_w)
+
         self.fit_xmax_spin = QSpinBox()
         self.fit_xmax_spin.setRange(-999999999, 999999999)
         self.fit_xmax_spin.setSingleStep(1)
         self.fit_xmax_spin.setValue(0)
-        ctrl1b.addWidget(self.fit_xmax_spin)
+        try:
+            self.fit_xmax_spin.setFixedWidth(88)
+        except Exception:
+            pass
+        fit_xmax_w = QWidget()
+        fit_xmax_l = QHBoxLayout(fit_xmax_w)
+        fit_xmax_l.setContentsMargins(0, 0, 0, 0)
+        fit_xmax_l.setSpacing(4)
+        fit_xmax_l.addWidget(QLabel('Fit x end:'))
+        fit_xmax_l.addWidget(self.fit_xmax_spin)
+        try:
+            fit_xmax_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl1b.addWidget(fit_xmax_w)
         self.btn_apply_range = QPushButton('Apply Range')
+        try:
+            _shrink_btn(self.btn_apply_range, pad=26)
+            self.btn_apply_range.setMinimumWidth(max(self.btn_apply_range.minimumWidth(), 116))
+        except Exception:
+            pass
         ctrl1b.addWidget(self.btn_apply_range)
-        # Option to rescale main plot to the selected fit range
-        self.rescale_cb = QCheckBox('Rescale plot to range')
+        # Rescale checkbox with indicator on the left and text right next to it.
+        self.rescale_cb = QCheckBox('Rescale\nplot to range')
         self.rescale_cb.setChecked(False)
         self.rescale_cb.setToolTip('When checked, zoom the main plot to the selected fit x-range')
+        try:
+            self.rescale_cb.setFixedWidth(130)
+        except Exception:
+            pass
         ctrl1b.addWidget(self.rescale_cb)
         ctrl_v.addWidget(ctrl_row1b)
+        try:
+            ctrl1b.setSpacing(6)
+        except Exception:
+            pass
 
-        # Row 3: LM method, max evals, autoscale
+        # Row 3: LM method, max evals, autoscale (grouped label+control pairs)
         ctrl_row2 = QWidget()
         ctrl2 = QHBoxLayout(ctrl_row2)
         ctrl2.setContentsMargins(0, 0, 0, 0)
-        ctrl2.addWidget(QLabel('LM method:'))
+        try:
+            ctrl2.setSpacing(6)
+        except Exception:
+            pass
+
+        # LM method group
         self.lm_method_combo = QComboBox()
         self.lm_method_combo.addItems(['least_squares', 'leastsq', 'nelder', 'powell', 'lbfgsb'])
-        ctrl2.addWidget(self.lm_method_combo)
-        ctrl2.addWidget(QLabel('Max evals:'))
+        try:
+            self.lm_method_combo.setFixedWidth(150)
+        except Exception:
+            pass
+        lm_w = QWidget()
+        lm_l = QHBoxLayout(lm_w)
+        lm_l.setContentsMargins(0, 0, 0, 0)
+        lm_l.setSpacing(4)
+        lm_l.addWidget(QLabel('LM method:'))
+        lm_l.addWidget(self.lm_method_combo)
+        try:
+            lm_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl2.addWidget(lm_w)
+
+        # Max evals group
         self.maxeval_spin = QSpinBox()
         self.maxeval_spin.setRange(1, 20000000)
         self.maxeval_spin.setSingleStep(100)
         self.maxeval_spin.setValue(10000)
-        ctrl2.addWidget(self.maxeval_spin)
-        ctrl2.addWidget(QLabel('Autoscale'))
+        try:
+            self.maxeval_spin.setFixedWidth(100)
+        except Exception:
+            pass
+        max_w = QWidget()
+        max_l = QHBoxLayout(max_w)
+        max_l.setContentsMargins(0, 0, 0, 0)
+        max_l.setSpacing(4)
+        max_l.addWidget(QLabel('Max evals:'))
+        max_l.addWidget(self.maxeval_spin)
+        try:
+            max_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl2.addWidget(max_w)
+
+        # Autoscale group (checkbox)
         self.autoscale_cb = QCheckBox()
         self.autoscale_cb.setChecked(True)
-        ctrl2.addWidget(self.autoscale_cb)
-        ctrl2.addWidget(QLabel('Post-fit diagnostics'))
+        autoscale_w = QWidget()
+        autoscale_l = QHBoxLayout(autoscale_w)
+        autoscale_l.setContentsMargins(0, 0, 0, 0)
+        autoscale_l.setSpacing(4)
+        autoscale_l.addWidget(QLabel('Autoscale'))
+        autoscale_l.addWidget(self.autoscale_cb)
+        try:
+            autoscale_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl2.addWidget(autoscale_w)
+
+        # Post-fit diagnostics group (checkbox)
         self.postfit_diag_cb = QCheckBox()
         # Off by default to keep UI responsive after each fit.
         self.postfit_diag_cb.setChecked(False)
-        ctrl2.addWidget(self.postfit_diag_cb)
+        postfit_w = QWidget()
+        postfit_l = QHBoxLayout(postfit_w)
+        postfit_l.setContentsMargins(0, 0, 0, 0)
+        postfit_l.setSpacing(4)
+        postfit_l.addWidget(QLabel('Post-fit diagnostics'))
+        postfit_l.addWidget(self.postfit_diag_cb)
+        try:
+            postfit_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl2.addWidget(postfit_w)
+
         ctrl_v.addWidget(ctrl_row2)
 
         # Row 4: grid and preview options
         ctrl_row3 = QWidget()
         ctrl3 = QHBoxLayout(ctrl_row3)
         ctrl3.setContentsMargins(0, 0, 0, 0)
-        ctrl3.addWidget(QLabel('Grid size:'))
+        # Grid size group
         self.grid_spin = QSpinBox()
         self.grid_spin.setRange(10, 10000)
         self.grid_spin.setSingleStep(10)
         self.grid_spin.setValue(4000)
-        ctrl3.addWidget(self.grid_spin)
-        ctrl3.addWidget(QLabel('ik_min:'))
+        try:
+            self.grid_spin.setFixedWidth(80)
+        except Exception:
+            pass
+        grid_w = QWidget()
+        grid_l = QHBoxLayout(grid_w)
+        grid_l.setContentsMargins(0, 0, 0, 0)
+        grid_l.setSpacing(4)
+        grid_l.addWidget(QLabel('Grid size:'))
+        grid_l.addWidget(self.grid_spin)
+        try:
+            grid_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl3.addWidget(grid_w)
+
+        # ik_min group
         self.ik_min_spin = QDoubleSpinBox()
         self.ik_min_spin.setRange(-10.0, 10.0)
         self.ik_min_spin.setSingleStep(0.01)
         self.ik_min_spin.setValue(0.0)
-        ctrl3.addWidget(self.ik_min_spin)
-        ctrl3.addWidget(QLabel('ik_max:'))
+        try:
+            self.ik_min_spin.setMinimumContentsLength(7)
+            self.ik_min_spin.setFixedWidth(86)
+        except Exception:
+            pass
+        ikmin_w = QWidget()
+        ikmin_l = QHBoxLayout(ikmin_w)
+        ikmin_l.setContentsMargins(0, 0, 0, 0)
+        ikmin_l.setSpacing(4)
+        ikmin_l.addWidget(QLabel('ik_min:'))
+        ikmin_l.addWidget(self.ik_min_spin)
+        try:
+            ikmin_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl3.addWidget(ikmin_w)
+
+        # ik_max group
         self.ik_max_spin = QDoubleSpinBox()
         self.ik_max_spin.setRange(-10.0, 10.0)
         self.ik_max_spin.setSingleStep(0.01)
         self.ik_max_spin.setValue(1.0)
-        ctrl3.addWidget(self.ik_max_spin)
-        ctrl3.addWidget(QLabel('Preview grid:'))
+        try:
+            self.ik_max_spin.setMinimumContentsLength(7)
+            self.ik_max_spin.setFixedWidth(86)
+        except Exception:
+            pass
+        ikmax_w = QWidget()
+        ikmax_l = QHBoxLayout(ikmax_w)
+        ikmax_l.setContentsMargins(0, 0, 0, 0)
+        ikmax_l.setSpacing(4)
+        ikmax_l.addWidget(QLabel('ik_max:'))
+        ikmax_l.addWidget(self.ik_max_spin)
+        try:
+            ikmax_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl3.addWidget(ikmax_w)
+
+        # Preview grid group
         self.preview_spin = QSpinBox()
         self.preview_spin.setRange(10, 2000)
         self.preview_spin.setValue(100)
-        ctrl3.addWidget(self.preview_spin)
+        try:
+            self.preview_spin.setFixedWidth(80)
+        except Exception:
+            pass
+        preview_w = QWidget()
+        preview_l = QHBoxLayout(preview_w)
+        preview_l.setContentsMargins(0, 0, 0, 0)
+        preview_l.setSpacing(4)
+        preview_l.addWidget(QLabel('Preview grid:'))
+        preview_l.addWidget(self.preview_spin)
+        try:
+            preview_w.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        except Exception:
+            pass
+        ctrl3.addWidget(preview_w)
         self.btn_preview = QPushButton('Preview')
         ctrl3.addWidget(self.btn_preview)
         self.btn_normalize = QPushButton('Normalize')
         ctrl3.addWidget(self.btn_normalize)
+        try:
+            _shrink_btn(self.btn_preview, pad=26)
+            _shrink_btn(self.btn_normalize, pad=26)
+            self.btn_preview.setMinimumWidth(max(self.btn_preview.minimumWidth(), 92))
+            self.btn_normalize.setMinimumWidth(max(self.btn_normalize.minimumWidth(), 102))
+        except Exception:
+            pass
         ctrl_v.addWidget(ctrl_row3)
+        try:
+            ctrl3.setSpacing(6)
+        except Exception:
+            pass
 
         left_l.addWidget(ctrl_container)
         # Tooltips for quick help
@@ -981,7 +1280,10 @@ class MainWindow(QMainWindow):
             self.gauss_count_spin = QSpinBox()
             self.gauss_count_spin.setRange(1, 10)
             self.gauss_count_spin.setValue(1)
-            self.gauss_count_spin.setMinimumWidth(70)
+            try:
+                self.gauss_count_spin.setFixedWidth(70)
+            except Exception:
+                pass
             self.gauss_count_spin.setEnabled(False)
             self.gauss_count_spin.valueChanged.connect(lambda v: (self._ensure_gaussian_params(), self._populate_param_table()))
             combo_layout.addWidget(self.gauss_count_spin)
@@ -997,7 +1299,10 @@ class MainWindow(QMainWindow):
             self.lorentz_count_spin = QSpinBox()
             self.lorentz_count_spin.setRange(1, 10)
             self.lorentz_count_spin.setValue(1)
-            self.lorentz_count_spin.setMinimumWidth(70)
+            try:
+                self.lorentz_count_spin.setFixedWidth(70)
+            except Exception:
+                pass
             self.lorentz_count_spin.setEnabled(False)
             self.lorentz_count_spin.valueChanged.connect(lambda v: (self._ensure_lorentz_params(), self._populate_param_table()))
             combo_layout.addWidget(self.lorentz_count_spin)
@@ -1044,6 +1349,11 @@ class MainWindow(QMainWindow):
         self.btn_plot_rescale_all.setToolTip('Reset both X and Y axes to show all plotted data')
         plot_btn_layout.addWidget(self.btn_plot_rescale_y)
         plot_btn_layout.addWidget(self.btn_plot_rescale_all)
+        try:
+            _shrink_btn(self.btn_plot_rescale_y)
+            _shrink_btn(self.btn_plot_rescale_all)
+        except Exception:
+            pass
         plot_btn_layout.addStretch(1)
 
         self.figure = Figure(figsize=(8, 6))
