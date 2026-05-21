@@ -86,12 +86,31 @@ python scripts/fit_peak.py path/to/data.txt -c configs/default_params.json -o re
 python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3
 ```
 
-Optional: compare accelerator modes explicitly (`auto`, `numpy`, `numba`):
+Optional: compare accelerator modes explicitly (`auto`, `c`, `numpy`, `numba`):
 
 ```bash
 python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3 --accelerator auto
+python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3 --accelerator c
 python scripts/benchmark_fit.py --points 2000 --grid-size 600 --repeats 3 --accelerator numpy
 ```
+
+Experimental native C accelerator (`c`)
+--------------------------------------
+
+The repository now includes an optional native C core for the grid integrator.
+You can build it into `build/peakfit_core.dll` on Windows using:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_c_core.ps1
+```
+
+After building, choose accelerator `c` from the GUI, or pass it in CLI mode:
+
+```bash
+python scripts/fit_peak.py path/to/data.txt -c configs/default_params.json -a c -o result.html
+```
+
+If the DLL is not present, the app falls back safely to the existing Python paths.
 
 If `numba` is installed, `--accelerator auto` will use the compiled grid path; otherwise it falls back to numpy automatically.
 

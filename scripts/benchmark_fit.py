@@ -112,7 +112,7 @@ def main():
     parser.add_argument('--grid-size', type=int, default=600, help='Grid size for integrator.')
     parser.add_argument('--repeats', type=int, default=3, help='Repeat count per benchmark.')
     parser.add_argument('--kernel', choices=['PCM_Fano_Bessel', 'PCM_Fano_Gauss'], default='PCM_Fano_Bessel')
-    parser.add_argument('--accelerator', choices=['auto', 'numpy', 'numba'], default='auto')
+    parser.add_argument('--accelerator', choices=['auto', 'c', 'numpy', 'numba'], default='auto')
     parser.add_argument('--output-json', default='', help='Optional path to write JSON results.')
     args = parser.parse_args()
 

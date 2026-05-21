@@ -26,6 +26,15 @@ except Exception:
     njit = None
     _NUMBA_AVAILABLE = False
 
+try:
+    from .c_core import c_core_available as _c_core_available
+    from .c_core import c_grid_integral as _c_grid_integral
+except Exception:
+    def _c_core_available() -> bool:
+        return False
+
+    _c_grid_integral = None
+
 
 _NUMERIC_EPS = 1e-24
 _IK_SMALL = 1e-12
@@ -62,12 +71,29 @@ def _kernel_to_code(kernel: str) -> int:
     return _KERNEL_CODE_BESSEL
 
 
+def _normalize_accelerator_mode(accelerator: Optional[str]) -> str:
+    return 'auto' if accelerator is None else str(accelerator).strip().lower()
+
+
+def _should_use_c(accelerator: Optional[str]) -> bool:
+    mode = _normalize_accelerator_mode(accelerator)
+    if mode in ('c', 'native'):
+        return _c_core_available()
+    if mode == 'auto':
+        return _c_core_available()
+    return False
+
+
 def _should_use_numba(accelerator: Optional[str]) -> bool:
-    mode = 'auto' if accelerator is None else str(accelerator).strip().lower()
+    mode = _normalize_accelerator_mode(accelerator)
     if mode in ('numpy', 'off', 'none', 'false'):
+        return False
+    if mode in ('c', 'native'):
         return False
     if mode == 'numba':
         return _NUMBA_AVAILABLE
+    if mode == 'auto' and _should_use_c('auto'):
+        return False
     return _NUMBA_AVAILABLE
 
 
@@ -76,12 +102,15 @@ def resolve_accelerator_mode(integrator: str = 'grid', accelerator: Optional[str
 
     Values:
     - "quad" when integrator is quad
+    - "c" when grid integrator uses the native C path
     - "numba" when grid integrator uses numba path
     - "numpy" otherwise
     """
     integ = str(integrator).strip().lower() if integrator is not None else 'grid'
     if integ == 'quad':
         return 'quad'
+    if _should_use_c(accelerator):
+        return 'c'
     return 'numba' if _should_use_numba(accelerator) else 'numpy'
 
 
@@ -155,6 +184,27 @@ if _NUMBA_AVAILABLE:
                 prev = cur
             out[j] = acc
         return out
+
+
+def _grid_integral_numpy(iw_arr,
+                         ik_min: float,
+                         ik_max: float,
+                         grid_size: int,
+                         C: float,
+                         D: float,
+                         b: float,
+                         g0: float,
+                         q: float,
+                         a: float,
+                         L: float,
+                         alpha: float,
+                         kernel: str):
+    ik = np.linspace(ik_min, ik_max, int(grid_size))
+    ik_mesh = ik[:, None]
+    iw_mesh = iw_arr[None, :]
+    vals = _kernel_integrand_prepared(ik_mesh, iw_mesh, C, D, b, g0, q, a, L, alpha, kernel=kernel)
+    dx = np.diff(ik)
+    return np.sum((vals[1:, :] + vals[:-1, :]) * (dx[:, None]) / 2.0, axis=0)
 
 def _get(params: Dict[str, Any], name: str, default: Any):
     """Retrieve a parameter value, accepting legacy 'i'-prefixed names.
@@ -298,7 +348,28 @@ def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_
 
     # Compute the integral over ik using the requested integrator
     if integrator == "grid":
-        if _should_use_numba(accelerator):
+        integral = None
+        if _should_use_c(accelerator):
+            try:
+                integral = _c_grid_integral(
+                    np.asarray(iw_arr, dtype=np.float64),
+                    float(ik_min),
+                    float(ik_max),
+                    int(grid_size),
+                    int(kernel_code),
+                    float(C),
+                    float(D),
+                    float(b),
+                    float(g0),
+                    float(q),
+                    float(a),
+                    float(L),
+                    float(alpha),
+                )
+            except Exception:
+                integral = None
+
+        if integral is None and _should_use_numba(accelerator):
             try:
                 integral = _grid_integral_numba(
                     np.asarray(iw_arr, dtype=np.float64),
@@ -316,19 +387,24 @@ def model_components(iw, params: Dict[str, Any], integrator: str = "grid", grid_
                     float(alpha),
                 )
             except Exception:
-                ik = np.linspace(ik_min, ik_max, int(grid_size))
-                ik_mesh = ik[:, None]
-                iw_mesh = iw_arr[None, :]
-                vals = _kernel_integrand_prepared(ik_mesh, iw_mesh, C, D, b, g0, q, a, L, alpha, kernel=kernel)
-                dx = np.diff(ik)
-                integral = np.sum((vals[1:, :] + vals[:-1, :]) * (dx[:, None]) / 2.0, axis=0)
-        else:
-            ik = np.linspace(ik_min, ik_max, int(grid_size))
-            ik_mesh = ik[:, None]
-            iw_mesh = iw_arr[None, :]
-            vals = _kernel_integrand_prepared(ik_mesh, iw_mesh, C, D, b, g0, q, a, L, alpha, kernel=kernel)
-            dx = np.diff(ik)
-            integral = np.sum((vals[1:, :] + vals[:-1, :]) * (dx[:, None]) / 2.0, axis=0)
+                integral = None
+
+        if integral is None:
+            integral = _grid_integral_numpy(
+                iw_arr,
+                float(ik_min),
+                float(ik_max),
+                int(grid_size),
+                float(C),
+                float(D),
+                float(b),
+                float(g0),
+                float(q),
+                float(a),
+                float(L),
+                float(alpha),
+                kernel=kernel,
+            )
     elif integrator == "quad":
         try:
             from scipy.integrate import quad

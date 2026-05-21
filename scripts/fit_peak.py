@@ -69,6 +69,7 @@ def main(argv=None):
     p.add_argument('-c', '--config', default='configs/default_params.json', help='Parameter config JSON')
     p.add_argument('-b', '--backend', choices=['scipy', 'lmfit'], default='scipy', help='Fitting backend')
     p.add_argument('-m', '--integrator', choices=['grid', 'quad'], default='grid', help='Integrator method')
+    p.add_argument('-a', '--accelerator', choices=['auto', 'c', 'numba', 'numpy'], default='auto', help='Acceleration mode for grid integrator')
     p.add_argument('-g', '--grid-size', type=int, default=400, help='Grid size for grid integrator')
     p.add_argument('-o', '--output', default='fit_result.html', help='Output HTML plot file')
     # If no argv and no CLI args provided, pop up GUI file dialogs
@@ -84,7 +85,11 @@ def main(argv=None):
     x, y = io_module.load_data(args.data)
     param_config = io_module.load_param_config(args.config)
 
-    integrator_opts = {'integrator': args.integrator, 'grid_size': args.grid_size}
+    integrator_opts = {
+        'integrator': args.integrator,
+        'grid_size': args.grid_size,
+        'accelerator': args.accelerator,
+    }
 
     # Prefer a small GUI progress indicator (useful for the EXE built without a console).
     use_tk = False

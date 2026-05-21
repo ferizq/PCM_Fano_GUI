@@ -45,6 +45,27 @@ def test_model_accelerator_modes_supported():
     assert np.allclose(y_auto, y_numpy, rtol=5e-3, atol=1e-8)
 
 
+def test_model_c_accelerator_supported_or_fallback():
+    iw = np.linspace(0.01, 1.0, 64)
+    params = {
+        'C': 171400.0,
+        'D': 100000.0,
+        'b': 0.0,
+        'g0': 4.5,
+        'q': 2.0,
+        'a': 0.5431,
+        'L': 10.0,
+        'N': 1.0,
+        'y0': 0.0,
+    }
+    y_c = model(iw, params, integrator='grid', grid_size=200, kernel='PCM_Fano_Bessel', accelerator='c')
+    y_numpy = model(iw, params, integrator='grid', grid_size=200, kernel='PCM_Fano_Bessel', accelerator='numpy')
+
+    assert y_c.shape == iw.shape
+    assert np.all(np.isfinite(y_c))
+    assert np.allclose(y_c, y_numpy, rtol=5e-3, atol=1e-8)
+
+
 def test_build_free_params_coerces_vary_flag():
     cfg = {
         'a': {'value': 1.0, 'vary': 'true'},

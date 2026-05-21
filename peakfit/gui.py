@@ -526,6 +526,8 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, 'accel_combo') and self.accel_combo is not None:
                 txt = str(self.accel_combo.currentText()).strip().lower()
+                if txt.startswith('c'):
+                    return 'c'
                 if txt.startswith('numba'):
                     return 'numba'
                 if txt.startswith('numpy'):
@@ -539,19 +541,32 @@ class MainWindow(QMainWindow):
         try:
             if not hasattr(self, 'accel_combo') or self.accel_combo is None:
                 return
-            idx = self.accel_combo.findText('numba')
+            idx_numba = self.accel_combo.findText('numba')
+            idx_c = self.accel_combo.findText('c')
             numba_available = resolve_accelerator_mode('grid', 'numba') == 'numba'
+            c_available = resolve_accelerator_mode('grid', 'c') == 'c'
             model = self.accel_combo.model()
-            if idx >= 0 and model is not None:
+            if idx_numba >= 0 and model is not None:
                 try:
-                    item = model.item(idx)
+                    item = model.item(idx_numba)
                     if item is not None:
                         item.setEnabled(bool(numba_available))
                 except Exception:
                     pass
+            if idx_c >= 0 and model is not None:
+                try:
+                    item = model.item(idx_c)
+                    if item is not None:
+                        item.setEnabled(bool(c_available))
+                except Exception:
+                    pass
             if (not numba_available) and self._selected_accelerator() == 'numba':
                 self.accel_combo.setCurrentText('auto')
-            tip = 'Acceleration mode for grid integrator: auto, numba, or numpy'
+            if (not c_available) and self._selected_accelerator() == 'c':
+                self.accel_combo.setCurrentText('auto')
+            tip = 'Acceleration mode for grid integrator: auto, c, numba, or numpy'
+            if not c_available:
+                tip += ' (native C core not built)'
             if not numba_available:
                 tip += ' (numba not installed in this environment)'
             self.accel_combo.setToolTip(tip)
@@ -566,8 +581,8 @@ class MainWindow(QMainWindow):
             integ = str(integrator).strip().lower()
             if integ == 'quad':
                 self.accel_indicator.setText(f'Accelerator: {selected} -> {effective} (quad ignores accelerator)')
-            elif selected == 'numba' and effective != 'numba':
-                self.accel_indicator.setText(f'Accelerator: {selected} -> {effective} (numba unavailable)')
+            elif selected in ('numba', 'c') and effective != selected:
+                self.accel_indicator.setText(f'Accelerator: {selected} -> {effective} ({selected} unavailable)')
             else:
                 self.accel_indicator.setText(f'Accelerator: {selected} -> {effective}')
         except Exception:
@@ -825,7 +840,7 @@ class MainWindow(QMainWindow):
         ctrl1.addWidget(self.integrator_combo)
         ctrl1.addWidget(QLabel('Accelerator:'))
         self.accel_combo = QComboBox()
-        self.accel_combo.addItems(['auto', 'numba', 'numpy'])
+        self.accel_combo.addItems(['auto', 'c', 'numba', 'numpy'])
         self.accel_combo.setCurrentText('auto')
         ctrl1.addWidget(self.accel_combo)
         ctrl_v.addWidget(ctrl_row1)
@@ -924,7 +939,7 @@ class MainWindow(QMainWindow):
         try:
             self.backend_combo.setToolTip('Choose fitting backend: lmfit (rich features) or scipy (curve_fit)')
             self.integrator_combo.setToolTip('Integrator: "grid" is fast/approximate, "quad" is accurate but slow')
-            self.accel_combo.setToolTip('Acceleration mode for grid integrator: auto, numba, or numpy')
+            self.accel_combo.setToolTip('Acceleration mode for grid integrator: auto, c, numba, or numpy')
             self.lm_method_combo.setToolTip('Minimizer method used by lmfit; try least_squares or leastsq')
             self.maxeval_spin.setToolTip('Maximum function evaluations for a full fit')
             self.autoscale_cb.setToolTip('Autoscale initial guesses for N and y0 from the loaded data')
